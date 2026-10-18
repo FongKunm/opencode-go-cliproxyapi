@@ -219,7 +219,7 @@ jobs:
           args=()
           for a in "$@"; do
             if [[ "$a" == *"download.freebsd.org/releases/"*"/14.3-RELEASE/base.txz"* ]]; then
-              args+=("${a/download.freebsd.org\/releases/archive.freebsd.org\/old-releases}")
+              args+=("${a/14.3-RELEASE/14.5-RELEASE}")
             else
               args+=("$a")
             fi
