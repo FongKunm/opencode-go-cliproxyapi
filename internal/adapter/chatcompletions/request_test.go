@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"opencode-go-cliproxyapi/internal/adapter/shared"
 	"opencode-go-cliproxyapi/internal/errclass"
 )
@@ -586,7 +586,6 @@ func TestFromResponsesRequest_FunctionCallOutputArray(t *testing.T) {
 	}
 }
 
-
 func TestBuildRequestResponsesVariants(t *testing.T) {
 	t.Run("empty string input yields no messages", func(t *testing.T) {
 		m := mustBuild(t, "openai-response", `{"input":""}`, nil)
@@ -1010,4 +1009,3 @@ func TestResponsesReasoningEffortPassthroughWithoutValidation(t *testing.T) {
 		t.Fatalf("reasoning_effort = %v, want xhigh", m["reasoning_effort"])
 	}
 }
-
