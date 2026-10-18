@@ -528,12 +528,14 @@ func TestFromClaudeMessagesFull(t *testing.T) {
 				{"type":"redacted_thinking","data":"xx"},
 				{"type":"tool_use","id":"tu_1","name":"lookup","input":{"q":"x"}},
 				{"type":"tool_use","id":"tu_2","name":"lookup","input":null},
-				{"type":"tool_use","id":"tu_3","name":"lookup"}
+				{"type":"tool_use","id":"tu_3","name":"lookup"},
+				{"type":"tool_use","id":"tu_4","name":"lookup"}
 			]},
 			{"role":"user","content":[
 				{"type":"tool_result","tool_use_id":"tu_1","content":"ok"},
 				{"type":"tool_result","tool_use_id":"tu_2","content":[{"type":"text","text":"part"}]},
-				{"type":"tool_result","tool_use_id":"tu_3","content":"boom","is_error":true},
+				{"type":"tool_result","tool_use_id":"tu_3","content":[{"type":"tool_reference","tool_name":"web_search"}]},
+				{"type":"tool_result","tool_use_id":"tu_4","content":"boom","is_error":true},
 				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}
 			]},
 			{"role":"user","content":[{"type":"text","text":"done"}]}
@@ -562,7 +564,7 @@ func TestFromClaudeMessagesFull(t *testing.T) {
 		t.Errorf("tool = %v", tl)
 	}
 	items := inputItems(t, m)
-	if len(items) != 10 {
+	if len(items) != 12 {
 		t.Fatalf("items = %d: %v", len(items), items)
 	}
 	if p := partMap(t, itemMap(t, items, 0), 0); p["type"] != "input_text" || p["text"] != "hello" {
@@ -576,32 +578,35 @@ func TestFromClaudeMessagesFull(t *testing.T) {
 		t.Errorf("assistant part = %v", p)
 	}
 	for i, want := range []struct{ id, args string }{
-		{"tu_1", `{"q":"x"}`}, {"tu_2", "{}"}, {"tu_3", "{}"},
+		{"tu_1", `{"q":"x"}`}, {"tu_2", "{}"}, {"tu_3", "{}"}, {"tu_4", "{}"},
 	} {
 		fc := itemMap(t, items, 2+i)
 		if fc["type"] != "function_call" || fc["call_id"] != want.id || fc["arguments"] != want.args {
 			t.Errorf("function_call %d = %v, want %+v", i, fc, want)
 		}
 	}
-	fco := itemMap(t, items, 5)
+	fco := itemMap(t, items, 6)
 	if fco["output"] != "ok" || fco["call_id"] != "tu_1" {
 		t.Errorf("tool output 0 = %v", fco)
 	}
-	if got := itemMap(t, items, 6)["output"]; got != "part" {
+	if got := itemMap(t, items, 7)["output"]; got != "part" {
 		t.Errorf("tool output 1 = %v, want text only", got)
 	}
-	if got := itemMap(t, items, 7)["output"]; got != "[error] boom" {
+	if got := itemMap(t, items, 8)["output"]; got != "[tool: web_search]" {
+		t.Errorf("tool output 2 = %v, want [tool: web_search]", got)
+	}
+	if got := itemMap(t, items, 9)["output"]; got != "[error] boom" {
 		t.Errorf("is_error marker = %v", got)
 	}
-	img := itemMap(t, items, 8)
+	img := itemMap(t, items, 10)
 	if img["role"] != "user" {
-		t.Fatalf("item8 = %v", img)
+		t.Fatalf("item10 = %v", img)
 	}
 	if p := partMap(t, img, 0); p["type"] != "input_image" || p["image_url"] != "data:image/png;base64,AAAA" {
 		t.Errorf("base64 image part = %v", p)
 	}
-	if p := partMap(t, itemMap(t, items, 9), 0); p["text"] != "done" {
-		t.Errorf("item9 = %v", p)
+	if p := partMap(t, itemMap(t, items, 11), 0); p["text"] != "done" {
+		t.Errorf("item11 = %v", p)
 	}
 }
 

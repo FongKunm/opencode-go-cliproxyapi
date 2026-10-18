@@ -467,6 +467,10 @@ func TestToolResultText(t *testing.T) {
 	if eErr != nil || got != "ab" {
 		t.Errorf("block array = %q, %v; want ab, nil", got, eErr)
 	}
+	gotRef, eErr := ToolResultText(json.RawMessage(`[{"type":"tool_reference","tool_name":"web_search"}]`), "n")
+	if eErr != nil || gotRef != "[tool: web_search]" {
+		t.Errorf("tool_reference block = %q, %v; want [tool: web_search], nil", gotRef, eErr)
+	}
 	if _, eErr := ToolResultText(json.RawMessage(`[{"type":"image","source":{}}]`), "tool messages carry text only"); eErr == nil ||
 		eErr.Class != errclass.ClassTranslation ||
 		eErr.Message != `unsupported tool_result block type "image"; tool messages carry text only` {

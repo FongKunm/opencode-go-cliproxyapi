@@ -432,19 +432,28 @@ func ToolResultText(raw json.RawMessage, targetNoun string) (string, *errclass.E
 		return s, nil
 	}
 	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ToolName string `json:"tool_name"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return "", errclass.Translation("tool_result content must be a string or an array of blocks")
 	}
 	var b strings.Builder
 	for _, blk := range blocks {
-		if blk.Type != "text" {
+		switch blk.Type {
+		case "text":
+			b.WriteString(blk.Text)
+		case "tool_reference":
+			if blk.ToolName != "" {
+				b.WriteString(fmt.Sprintf("[tool: %s]", blk.ToolName))
+			} else {
+				b.WriteString("[tool reference]")
+			}
+		default:
 			return "", errclass.Translation(fmt.Sprintf(
 				"unsupported tool_result block type %q; %s", blk.Type, targetNoun))
 		}
-		b.WriteString(blk.Text)
 	}
 	return b.String(), nil
 }

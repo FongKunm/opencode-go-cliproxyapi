@@ -495,6 +495,14 @@ func TestBuildRequestClaudeVariants(t *testing.T) {
 			t.Fatalf("block array result not flattened: %v", tool)
 		}
 	})
+	t.Run("tool_result tool_reference content", func(t *testing.T) {
+		m := mustBuild(t, "claude",
+			`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}]}`, nil)
+		tool := m["messages"].([]any)[0].(map[string]any)
+		if tool["content"] != "[tool: web_search]" {
+			t.Fatalf("tool_reference block not serialized: %v", tool)
+		}
+	})
 	t.Run("tool_result is_error marker", func(t *testing.T) {
 		// is_error must survive as the "[error] " prefix like the
 		// Responses-route twin (responses/request.go), never silently lost.

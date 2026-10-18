@@ -291,7 +291,7 @@ func TestLiveCodexGrokReasoningReplayAccepted(t *testing.T) {
 func TestLiveCodexCustomToolAccepted(t *testing.T) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	payload := map[string]any{
-		"model": modelID("space-bunny-free"),
+		"model": modelID("deepseek-v4.1-flash"),
 		"input": "say ok",
 		"tools": []map[string]any{
 			{
@@ -330,6 +330,82 @@ func TestLiveCodexCustomToolAccepted(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected HTTP 200, got %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+// TestLiveClaudeToolReferenceToChatCompletions reproduces Issue #14: Claude Code
+// ToolSearch emits tool_reference blocks inside tool_result, which must not fail
+// with 500 when routed to Chat Completions models like DeepSeek.
+func TestLiveClaudeToolReferenceToChatCompletions(t *testing.T) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	url := cpaHost + "/v1/messages"
+
+	body := map[string]any{
+		"model":      modelID("deepseek-v4.1-flash"),
+		"max_tokens": 500,
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": "search for weather",
+			},
+			{
+				"role": "assistant",
+				"content": []map[string]any{
+					{
+						"type":  "tool_use",
+						"id":    "call_web_search_01",
+						"name":  "web_search",
+						"input": map[string]any{"query": "weather"},
+					},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{
+						"type":        "tool_result",
+						"tool_use_id": "call_web_search_01",
+						"content": []map[string]any{
+							{
+								"type":      "tool_reference",
+								"tool_name": "web_search",
+							},
+						},
+					},
+					{
+						"type": "text",
+						"text": "here is the tool reference, please continue",
+					},
+				},
+			},
+		},
+	}
+
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cpaKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	if !strings.Contains(string(respBody), `"content"`) {
+		t.Fatalf("response missing content block: %s", string(respBody))
 	}
 }
 
