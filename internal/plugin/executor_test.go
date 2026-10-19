@@ -1272,13 +1272,28 @@ func TestExecutorIdentifierAndCountTokens(t *testing.T) {
 	if !env.OK || !strings.Contains(string(env.Result), `"identifier":"opencode-go"`) {
 		t.Fatalf("identifier envelope = %s", resp)
 	}
-	resp, err = m.HandleCall("executor.count_tokens", nil)
+	// 我们 fork 后补上了 count_tokens（1020）：必须返回计数，不能再是 unsupported。
+	countReq, _ := json.Marshal(map[string]any{
+		"Model":           "m",
+		"SourceFormat":    "claude",
+		"OriginalRequest": []byte(`{"model":"m","messages":[{"role":"user","content":"hello world"}]}`),
+	})
+	resp, err = m.HandleCall("executor.count_tokens", countReq)
 	if err != nil {
 		t.Fatalf("count_tokens: %v", err)
 	}
 	env = decodeEnv(t, resp)
-	if env.OK || env.Error == nil || env.Error.Code != string(errclass.ClassUnsupported) {
+	if !env.OK {
 		t.Fatalf("count_tokens envelope = %s", resp)
+	}
+	var countResult struct {
+		Payload []byte `json:"Payload"` // ExecutorResponse.Payload 是 []byte，信封里是 base64
+	}
+	if err := json.Unmarshal(env.Result, &countResult); err != nil {
+		t.Fatalf("count_tokens result = %s: %v", env.Result, err)
+	}
+	if !strings.Contains(string(countResult.Payload), `"input_tokens":`) {
+		t.Fatalf("count_tokens payload = %s", countResult.Payload)
 	}
 	// executor.http_request has no handler either: it must classify as
 	// unsupported (not generic unknown_method), naming the method/endpoint.

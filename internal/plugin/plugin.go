@@ -26,8 +26,10 @@ const ProviderID = "opencode-go"
 
 // pluginName / pluginVersion are reported in registration metadata.
 const (
-	pluginName    = "opencode-go-cliproxyapi"
-	pluginVersion = "0.2.2"
+	pluginName = "opencode-go-cliproxyapi"
+	// pluginVersion 必须和 .so 文件名里的 -v<版本> 完全一致，宿主按文件名解析后做等值比对。
+	// 我们 fork 的补丁版：0.2.2 上游 + count_tokens。
+	pluginVersion = "0.2.2-ph1"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -149,10 +151,7 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 	case pluginabi.MethodExecutorIdentifier:
 		return okEnvelope(map[string]string{"identifier": ProviderID}), nil
 	case pluginabi.MethodExecutorCountTokens:
-		return classEnvelope(&errclass.Error{
-			Class:   errclass.ClassUnsupported,
-			Message: "executor.count_tokens has no OpenCode Go equivalent",
-		}), nil
+		return m.handleCountTokens(request)
 	case pluginabi.MethodExecutorHTTPRequest:
 		return classEnvelope(&errclass.Error{
 			Class:   errclass.ClassUnsupported,
