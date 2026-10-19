@@ -779,4 +779,75 @@ func TestLiveEdgeCases(t *testing.T) {
 		}
 		t.Logf("Multi-turn Messages->Chat recall success: %q", text)
 	})
+
+	t.Run("Messages_ClaudeToolResultImage_ChatRoute", func(t *testing.T) {
+		time.Sleep(500 * time.Millisecond)
+		payload := map[string]any{
+			"model":      modelID("deepseek-v4.1-flash"),
+			"max_tokens": 16,
+			"messages": []any{
+				map[string]any{
+					"role":    "user",
+					"content": "Read test.png",
+				},
+				map[string]any{
+					"role": "assistant",
+					"content": []any{
+						map[string]any{
+							"type":  "tool_use",
+							"id":    "toolu_123",
+							"name":  "Read",
+							"input": map[string]any{"file_path": "test.png"},
+						},
+					},
+				},
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":        "tool_result",
+							"tool_use_id": "toolu_123",
+							"content": []any{
+								map[string]any{
+									"type": "image",
+									"source": map[string]any{
+										"type":       "base64",
+										"media_type": "image/png",
+										"data":       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		b, _ := json.Marshal(payload)
+		req, _ := http.NewRequest(http.MethodPost, cpaHost+"/v1/messages", bytes.NewReader(b))
+		req.Header.Set("x-api-key", cpaKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected HTTP 200, got %d: %s", resp.StatusCode, string(body))
+		}
+
+		var result struct {
+			Role string `json:"role"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			t.Fatalf("decode JSON: %v", err)
+		}
+		if result.Role != "assistant" {
+			t.Fatalf("expected assistant role, got: %q", result.Role)
+		}
+		t.Logf("Claude tool result image successfully accepted and routed to Chat Completions")
+	})
 }

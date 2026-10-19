@@ -12,6 +12,7 @@ Before submitting, read [CONTRIBUTING.md](../CONTRIBUTING.md), especially the Pu
 
 - [ ] `go test -tags debug ./...`
 - [ ] `go vet ./...`
+- [ ] For bug fixes: live test added to `tests/live_smoke_test.go` (`go test -tags live ./tests/...`).
 - [ ] New or modified behavioral paths have unit tests.
 - [ ] Protocol changes include streaming and non-streaming tests.
 - [ ] `RELEASE_NOTES.md` is updated.
