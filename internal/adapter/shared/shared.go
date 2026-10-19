@@ -458,6 +458,50 @@ func ToolResultText(raw json.RawMessage, targetNoun string) (string, *errclass.E
 	return b.String(), nil
 }
 
+// ToolResultParts preserves images while using ToolResultText for every
+// non-image block, including tool_reference markers. Images use the same
+// source validation as ordinary Claude message content.
+func ToolResultParts(raw json.RawMessage) ([]ContentPart, *errclass.Error) {
+	if !HasContent(raw) {
+		return nil, nil
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return []ContentPart{{Text: text}}, nil
+	}
+	var blocks []json.RawMessage
+	if json.Unmarshal(raw, &blocks) != nil {
+		return nil, errclass.Translation("tool_result content must be a string or an array of blocks")
+	}
+	parts := make([]ContentPart, 0, len(blocks))
+	for _, block := range blocks {
+		var kind struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(block, &kind) != nil {
+			return nil, errclass.Translation("malformed content block")
+		}
+		single := make(json.RawMessage, 0, len(block)+2)
+		single = append(single, '[')
+		single = append(single, block...)
+		single = append(single, ']')
+		if kind.Type == "image" {
+			images, eErr := decodeClaudeBlocks(single)
+			if eErr != nil {
+				return nil, eErr
+			}
+			parts = append(parts, ContentPart{ImageURL: images[0].URL})
+		} else {
+			text, eErr := ToolResultText(single, "tool results support text, tool references and images")
+			if eErr != nil {
+				return nil, eErr
+			}
+			parts = append(parts, ContentPart{Text: text})
+		}
+	}
+	return parts, nil
+}
+
 // RespOutputText flattens Responses function_call_output output content (JSON
 // string or content part array) into one string for target protocol tool results.
 // It accepts part types "input_text" and "text", and returns a translation error

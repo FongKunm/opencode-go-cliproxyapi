@@ -238,61 +238,60 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 	return encode(out), nil
 }
 
-// claudeResultText flattens tool_result content (string or text blocks)
-// into a tool-message string via the shared kernel; non-text blocks have
-// no tool-message equivalent and are rejected descriptively rather than
-// dropped (FR-005).
-func claudeResultText(content json.RawMessage) (string, *errclass.Error) {
-	return shared.ToolResultText(content, "tool messages carry text only")
-}
-
-// claudeUserMessages converts a user turn into Chat Completions messages:
-// text/image blocks become one user message (plain string when only
-// text), each tool_result block becomes a separate role:"tool" message
-// carrying its tool_use_id (FR-005).
+// claudeUserMessages keeps all tool replies adjacent, then emits tool images
+// in a user message associated with their tool_call_id. This preserves parallel
+// tool-call protocol ordering and retains the original image bytes/URLs.
 func claudeUserMessages(m *shared.ClaudeMessageRecord) ([]ccMessage, *errclass.Error) {
 	var msgs []ccMessage
 	var parts []ccContentPart
-	flush := func() {
-		if len(parts) == 0 {
-			return
-		}
-		var c any = parts
-		if len(parts) == 1 && parts[0].Type == "text" {
-			c = parts[0].Text
-		}
-		msgs = append(msgs, ccMessage{Role: "user", Content: c})
-		parts = nil
-	}
 	if m.Content != "" {
 		parts = append(parts, ccContentPart{Type: "text", Text: m.Content})
 	}
-	for i := range m.Blocks {
-		blk := &m.Blocks[i]
+	for _, blk := range m.Blocks {
 		switch blk.Kind {
 		case "text":
 			parts = append(parts, ccContentPart{Type: "text", Text: blk.Text})
 		case "image":
 			parts = append(parts, ccContentPart{Type: "image_url", ImageURL: &imageURLField{URL: blk.URL}})
 		case "tool_result":
-			text, eErr := claudeResultText(blk.Result)
+			result, eErr := shared.ToolResultParts(blk.Result)
 			if eErr != nil {
 				return nil, eErr
 			}
-			if blk.IsError {
-				// Same convention as the Responses-route twin so the
-				// flag is never silently erased (FR-005).
-				text = shared.ToolResultErrorPrefix + text
+			var text strings.Builder
+			hasImage := false
+			for _, part := range result {
+				if part.ImageURL != "" {
+					hasImage = true
+				} else {
+					text.WriteString(part.Text)
+				}
 			}
-			flush()
-			msgs = append(msgs, ccMessage{
-				Role: "tool", Content: text, ToolCallID: blk.CallID,
-			})
+			toolText := text.String()
+			if blk.IsError {
+				toolText = shared.ToolResultErrorPrefix + toolText
+			}
+			if hasImage {
+				toolText += "\n[Images from this tool result are in the following user message, labeled with tool_call_id " + blk.CallID + ".]"
+				parts = append(parts, ccContentPart{Type: "text", Text: "Tool result images for tool_call_id " + blk.CallID + ":"})
+				for _, part := range result {
+					if part.ImageURL != "" {
+						parts = append(parts, ccContentPart{Type: "image_url", ImageURL: &imageURLField{URL: part.ImageURL}})
+					}
+				}
+			}
+			msgs = append(msgs, ccMessage{Role: "tool", Content: toolText, ToolCallID: blk.CallID})
 		default:
 			return nil, shared.UnsupportedPartType(blk.Kind, EndpointPath)
 		}
 	}
-	flush()
+	if len(parts) > 0 {
+		var content any = parts
+		if len(parts) == 1 && parts[0].Type == "text" {
+			content = parts[0].Text
+		}
+		msgs = append(msgs, ccMessage{Role: "user", Content: content})
+	}
 	return msgs, nil
 }
 
