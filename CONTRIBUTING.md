@@ -36,9 +36,10 @@ go build -tags debug -buildmode=c-shared -o plugins/windows/amd64/opencode-go-cl
 1. **Focused Scope:** Keep each PR targeted to a single fix or feature. Avoid bundling unrelated refactors or features together.
 2. **Debug-Mode Verification:** Verify all changes using `-tags debug`. Release packaging is handled separately by CI.
 3. **Test Coverage:** All new or modified behavioral paths require unit tests. Both streaming and non-streaming tests are required for protocol changes.
-4. **Offline Execution:** Unit tests must run locally and offline against mock host clients. Do not introduce dependencies on live external APIs.
-5. **Documentation:** Append or merge changes into `RELEASE_NOTES.md` and update `README.md` if user-facing configuration changes.
-6. **Code Style:** Format all code with standard `gofmt` and adhere to idiomatic Go conventions.
+4. **Live Tests for Bug Fixes:** Any bug fix must include a live test in `tests/live_smoke_test.go` (`go test -tags live ./tests/...`) covering the reported issue.
+5. **Offline Execution:** Unit tests must run locally and offline against mock host clients. Do not introduce dependencies on live external APIs into unit tests.
+6. **Documentation:** Append or merge changes into `RELEASE_NOTES.md` and update `README.md` if user-facing configuration changes.
+7. **Code Style:** Format all code with standard `gofmt` and adhere to idiomatic Go conventions.
 
 ---
 
