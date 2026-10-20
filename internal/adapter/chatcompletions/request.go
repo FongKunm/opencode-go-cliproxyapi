@@ -32,10 +32,12 @@ func AuthHeaders(key string) http.Header {
 // Messages) into a Chat Completions body for upstreamModel (FR-005).
 // ts carries the target model's thinking capability so reasoning
 // budgets map to a supported effort level instead of being silently
-// degraded (FR-005). Unknown formats are ClassUnsupported; malformed
-// input is ClassTranslation. Errors are descriptive and redacted — no
-// silent loss of tools or reasoning controls.
+// degraded (FR-005); it is widened per family by thinking.ForModel
+// (DeepSeek takes the full canonical ladder). Unknown formats are
+// ClassUnsupported; malformed input is ClassTranslation. Errors are
+// descriptive and redacted — no silent loss of tools or reasoning controls.
 func BuildRequest(upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
+	ts = thinking.ForModel(upstreamModel, ts)
 	switch sourceFormat {
 	case "openai":
 		return buildOpenAIRequest(upstreamModel, sourceBody)
@@ -164,9 +166,9 @@ type claudeBlock = map[string]any
 // assistant tool_calls, tool_result blocks become role:"tool" messages,
 // max_tokens/stop_sequences/tools map to their CC equivalents
 // (max_tokens defaulted by the shared kernel, FR-005), and the thinking
-// budget maps to a capability-aware reasoning_effort via
-// thinking.EffortFromBudget. Decoding is owned entirely by the shared
-// Claude-request kernel; only target-shape rendering stays local.
+// control plus output_config.effort map to a capability-aware
+// reasoning_effort via thinking.ClaudeEffort. Decoding is owned entirely by
+// the shared Claude-request kernel; only target-shape rendering stays local.
 func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
 	src, eErr := shared.DecodeClaudeMessages(body)
 	if eErr != nil {
@@ -182,8 +184,8 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 	if len(src.StopSequences) > 0 {
 		out.Stop = src.StopSequences
 	}
-	if shared.ThinkingEnabled(src.Thinking) {
-		out.ReasoningEffort = thinking.EffortFromBudget(src.Thinking.BudgetTokens, ts)
+	if effort, ok := claudeReasoningEffort(src, ts); ok {
+		out.ReasoningEffort = effort
 	}
 	applyToolChoiceCC(out, src.ToolChoiceKind, src.ToolChoiceName)
 	if src.System != "" {

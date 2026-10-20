@@ -1386,6 +1386,7 @@ type ClaudeRequestRecord struct {
 	ToolChoiceKind string
 	ToolChoiceName string
 	Thinking       *ClaudeThinking
+	OutputEffort   string // output_config.effort per ClaudeOutputEffort; "" when absent
 	Stream         bool
 	Temperature    *float64
 	TopP           *float64
@@ -1432,6 +1433,7 @@ func DecodeClaudeMessages(body json.RawMessage) (*ClaudeRequestRecord, *errclass
 		Tools         []ClaudeTool        `json:"tools"`
 		ToolChoice    json.RawMessage     `json:"tool_choice"`
 		Thinking      *ClaudeThinking     `json:"thinking"`
+		OutputConfig  json.RawMessage     `json:"output_config"`
 		Stream        bool                `json:"stream"`
 		Temperature   *float64            `json:"temperature"`
 		TopP          *float64            `json:"top_p"`
@@ -1455,6 +1457,7 @@ func DecodeClaudeMessages(body json.RawMessage) (*ClaudeRequestRecord, *errclass
 		ToolChoiceKind: kind,
 		ToolChoiceName: name,
 		Thinking:       env.Thinking,
+		OutputEffort:   ClaudeOutputEffort(env.OutputConfig),
 		Stream:         env.Stream,
 		Temperature:    env.Temperature,
 		TopP:           env.TopP,

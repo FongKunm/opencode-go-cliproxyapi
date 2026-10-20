@@ -256,9 +256,17 @@ func TestBuildRequestThinkingEffort(t *testing.T) {
 			}
 		})
 	}
+	// Disabled thinking is the off state clamped to the model's ladder: the
+	// default low/medium/high ladder has no "none", so the weakest level
+	// stands in (DeepSeek keeps "none"; see TestClaudeThinkingControlMatrix).
 	m := mustBuild(t, "claude", `{"max_tokens":64,"thinking":{"type":"disabled"}}`, nil)
-	if _, ok := m["reasoning_effort"]; ok {
-		t.Fatalf("disabled thinking must not set reasoning_effort: %v", m)
+	if m["reasoning_effort"] != "low" {
+		t.Fatalf("disabled thinking must clamp the off state, got %v", m["reasoning_effort"])
+	}
+	m = mustBuild(t, "claude", `{"max_tokens":64,"thinking":{"type":"disabled"}}`,
+		&pluginapi.ThinkingSupport{ZeroAllowed: true, Levels: []string{"low", "high"}})
+	if m["reasoning_effort"] != "none" {
+		t.Fatalf("disabled thinking with ZeroAllowed must send none, got %v", m["reasoning_effort"])
 	}
 }
 
