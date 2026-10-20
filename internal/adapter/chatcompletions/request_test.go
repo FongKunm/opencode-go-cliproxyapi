@@ -370,14 +370,14 @@ func TestBuildRequestClaudeErrors(t *testing.T) {
 		{"source not an object", `{"messages":[{"role":"user","content":[{"type":"image","source":"x"}]}]}`},
 		{"url source missing url", `{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url"}}]}]}`},
 		{"base64 missing data", `{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64"}}]}]}`},
-		{"unknown source type", `{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"s3"}}]}]}`},
-		{"result bad block type", `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"video"}]}]}]}`},
 		{"result malformed block", `{"messages":[{"role":"user","content":[{"type":"tool_result","content":[42]}]}]}`},
 		{"result content wrong shape", `{"messages":[{"role":"user","content":[{"type":"tool_result","content":42}]}]}`},
 		{"assistant malformed block", `{"messages":[{"role":"assistant","content":[42]}]}`},
-		{"system bad block type", `{"system":[{"type":"doc"}]}`},
 		{"system wrong shape", `{"system":123}`},
 	}
+	// Well-formed blocks of unknown type, unsupported image sources and
+	// non-text system blocks no longer fail: sanitize rewrites them (see
+	// request_sanitize_test.go). Malformed shapes above still do.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, eErr := BuildRequest("m", "claude", []byte(tc.body), nil)
@@ -386,21 +386,8 @@ func TestBuildRequestClaudeErrors(t *testing.T) {
 			}
 		})
 	}
-	// Unknown content-block types and unknown roles are
-	// unsupported_protocol_or_parameter (FR-009 kernel), matching the
-	// Responses route.
-	for _, c := range []struct{ name, body, typ string }{
-		{"bad user block type", `{"messages":[{"role":"user","content":[{"type":"video"}]}]}`, `"video"`},
-		{"bad assistant block type", `{"messages":[{"role":"assistant","content":[{"type":"video"}]}]}`, `"video"`},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			_, eErr := BuildRequest("m", "claude", []byte(c.body), nil)
-			if eErr == nil || eErr.Class != errclass.ClassUnsupported ||
-				!strings.Contains(eErr.Message, c.typ) || !strings.Contains(eErr.Message, EndpointPath) {
-				t.Fatalf("want ClassUnsupported naming type+endpoint, got %+v", eErr)
-			}
-		})
-	}
+	// Unknown roles are unsupported_protocol_or_parameter (FR-009 kernel),
+	// matching the Responses route.
 	_, eErr := BuildRequest("m", "claude", []byte(`{"messages":[{"role":"robot","content":"x"}]}`), nil)
 	if eErr == nil || eErr.Class != errclass.ClassUnsupported ||
 		!strings.Contains(eErr.Message, `"robot"`) {
@@ -684,7 +671,6 @@ func TestBuildRequestResponsesErrors(t *testing.T) {
 		{"malformed json", `{`},
 		{"instructions not a string", `{"instructions":5}`},
 		{"input wrong shape", `{"input":5}`},
-		{"system with image part", `{"input":[{"type":"message","role":"system","content":[{"type":"input_image","image_url":{"url":"https://x"}}]}]}`},
 		{"image missing url", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image"}]}]}`},
 		{"malformed content", `{"input":[{"type":"message","role":"user","content":{"bad":1}}]}`},
 		{"developer content wrong shape", `{"input":[{"type":"message","role":"developer","content":{"bad":1}}]}`},
@@ -697,12 +683,12 @@ func TestBuildRequestResponsesErrors(t *testing.T) {
 			}
 		})
 	}
-	// Unknown roles, content part types, and input item types are
-	// unsupported_protocol_or_parameter (FR-009 kernel), not translation.
+	// Unknown roles are unsupported_protocol_or_parameter (FR-009 kernel),
+	// not translation. Unknown content part and input item types, and
+	// images in system messages, are rewritten by sanitize instead (see
+	// request_sanitize_test.go).
 	for _, tc := range []struct{ name, body string }{
 		{"unsupported role", `{"input":[{"type":"message","role":"robot","content":"x"}]}`},
-		{"unsupported part type", `{"input":[{"type":"message","role":"user","content":[{"type":"audio"}]}]}`},
-		{"unsupported item type", `{"input":[{"type":"web_search"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, eErr := BuildRequest("m", "openai-response", []byte(tc.body), nil)
@@ -1136,7 +1122,9 @@ func TestClaudeToolImagesPreserveParallelResults(t *testing.T) {
 }
 
 func TestClaudeToolImagesRejectMalformedSource(t *testing.T) {
-	for _, source := range []string{`null`, `{"type":"base64"}`, `{"type":"url"}`, `{"type":"s3"}`} {
+	// A well-formed but unsupported source type ({"type":"file"}, …) is
+	// rewritten to a marker instead; see request_sanitize_test.go.
+	for _, source := range []string{`null`, `{"type":"base64"}`, `{"type":"url"}`} {
 		body := `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":[{"type":"image","source":` + source + `}]}]}]}`
 		if _, err := BuildRequest("m", "claude", []byte(body), nil); err == nil {
 			t.Fatalf("accepted malformed image: %s", source)

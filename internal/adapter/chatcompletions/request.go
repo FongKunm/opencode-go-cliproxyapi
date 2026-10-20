@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
+	"opencode-go-cliproxyapi/internal/adapter/sanitize"
 	"opencode-go-cliproxyapi/internal/adapter/shared"
 	"opencode-go-cliproxyapi/internal/catalog"
 	"opencode-go-cliproxyapi/internal/errclass"
@@ -168,6 +169,7 @@ type claudeBlock = map[string]any
 // thinking.EffortFromBudget. Decoding is owned entirely by the shared
 // Claude-request kernel; only target-shape rendering stays local.
 func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
+	body = sanitize.ClaudeMessages(body) // history this route cannot represent becomes text
 	src, eErr := shared.DecodeClaudeMessages(body)
 	if eErr != nil {
 		return nil, eErr
@@ -342,6 +344,7 @@ func claudeAssistantMessage(m *shared.ClaudeMessageRecord) (*ccMessage, *errclas
 // reasoning items are omitted (no CC equivalent; FR-005 explicit omission
 // policy).
 func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport, tools *shared.ResponseTools) ([]byte, *errclass.Error) {
+	body = sanitize.Responses(body) // history this route cannot represent becomes text
 	var src shared.ResponsesRequest
 	if err := json.Unmarshal(body, &src); err != nil {
 		return nil, errclass.Translation("malformed openai-response request JSON: " + err.Error())
