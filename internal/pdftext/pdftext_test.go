@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -390,6 +391,40 @@ func TestExtractBusy(t *testing.T) {
 	data := doc(helvetica, "", fmt.Sprintf("BT (busy %d) Tj ET", time.Now().UnixNano()))
 	if r := Extract(data); !errors.Is(r.Err, ErrBusy) {
 		t.Fatalf("Err = %v, want ErrBusy", r.Err)
+	}
+}
+
+func TestExtractConcurrent(t *testing.T) {
+	shared := doc(helvetica, "", fmt.Sprintf("BT /F1 12 Tf 72 700 Td (shared %d) Tj ET", time.Now().UnixNano()))
+	var wg sync.WaitGroup
+	errs := make(chan string, 64)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			data := shared
+			want := ""
+			if i%2 == 1 {
+				want = fmt.Sprintf("own %d %d", i, time.Now().UnixNano())
+				data = doc(helvetica, "", "BT /F1 12 Tf 72 700 Td ("+want+") Tj ET")
+			}
+			r := Extract(data)
+			switch {
+			case errors.Is(r.Err, ErrBusy):
+				// allowed under contention
+			case r.Err != nil:
+				errs <- r.Err.Error()
+			case want != "" && r.Text != want:
+				errs <- "got " + r.Text + ", want " + want
+			case want == "" && !strings.HasPrefix(r.Text, "shared "):
+				errs <- "shared doc: " + r.Text
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatal(e)
 	}
 }
 
