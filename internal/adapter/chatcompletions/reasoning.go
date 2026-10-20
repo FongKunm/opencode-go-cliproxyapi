@@ -1,6 +1,12 @@
 package chatcompletions
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+
+	"opencode-go-cliproxyapi/internal/adapter/shared"
+)
 
 // ---- upstream reasoning text (FR-006) ----
 
@@ -41,6 +47,16 @@ func rawString(raw json.RawMessage) string {
 type reasoningState struct {
 	thinkingOpen  bool // claude: a thinking content block is open
 	thinkingIndex int  // claude: index of the open thinking block
+
+	rsOpen  *respReasoning   // openai-response: reasoning item still streaming
+	rsItems []*respReasoning // openai-response: every announced reasoning item, in index order
+}
+
+// respReasoning is one streamed reasoning output item (openai-response).
+type respReasoning struct {
+	id    string
+	index int // output_index assigned at announcement
+	text  strings.Builder
 }
 
 // ---- claude (Anthropic Messages) target ----
@@ -84,4 +100,89 @@ func (sc *StreamConverter) stopThinking() [][]byte {
 	}
 	sc.thinkingOpen = false
 	return [][]byte{sc.claudeEm.ContentBlockStop(sc.thinkingIndex)}
+}
+
+// ---- openai-response (Responses) target ----
+
+// reasoningItemID names the n-th reasoning item of a response: "rs_<id>"
+// for the first, "rs_<id>_<n>" after, so it never collides with the
+// message item (which carries the bare response id) or a sibling.
+func reasoningItemID(responseID string, n int) string {
+	if n == 0 {
+		return "rs_" + responseID
+	}
+	return "rs_" + responseID + "_" + strconv.Itoa(n)
+}
+
+// reasoningOutputItem renders non-stream reasoning as the leading output
+// item (FR-006, chatToResponses); ok is false without reasoning text.
+func reasoningOutputItem(responseID, text string) (shared.RespReasoningItem, bool) {
+	if text == "" {
+		return shared.RespReasoningItem{}, false
+	}
+	return shared.NewRespReasoningItem(reasoningItemID(responseID, 0), text), true
+}
+
+// responsesReasoning renders one streamed reasoning fragment as a
+// Responses reasoning item (summary form, see shared.RespReasoningItem):
+// the first fragment announces the item at the next output index
+// (output_item.added with an empty summary, then summary part 0), and
+// every fragment streams as response.reasoning_summary_text.delta.
+// Reasoning that resumes after another item opens a fresh reasoning item.
+func (sc *StreamConverter) responsesReasoning(text string) [][]byte {
+	em := sc.responsesEm()
+	var events [][]byte
+	if sc.rsOpen == nil {
+		r := &respReasoning{id: reasoningItemID(sc.id, len(sc.rsItems)), index: sc.nextIndex}
+		sc.nextIndex++
+		sc.rsOpen = r
+		sc.rsItems = append(sc.rsItems, r)
+		events = append(events, em.ReasoningItemAdded(r.index, r.id), em.ReasoningSummaryPartAdded(r.id, r.index))
+	}
+	sc.rsOpen.text.WriteString(text)
+	return append(events, em.ReasoningSummaryTextDelta(sc.rsOpen.id, sc.rsOpen.index, text))
+}
+
+// closeReasoning completes the streaming reasoning item, if any: summary
+// text done, summary part done, then output_item.done with the full item.
+// It runs before any content or tool-call delta (items complete in order,
+// so a client never sees the next item start while reasoning is still
+// open) and at the terminal.
+func (sc *StreamConverter) closeReasoning() [][]byte {
+	r := sc.rsOpen
+	if r == nil {
+		return nil
+	}
+	sc.rsOpen = nil
+	em := sc.responsesEm()
+	text := r.text.String()
+	return [][]byte{
+		em.ReasoningSummaryTextDone(r.id, r.index, text),
+		em.ReasoningSummaryPartDone(r.id, r.index, text),
+		em.ItemDone(r.index, shared.NewRespReasoningItem(r.id, text)),
+	}
+}
+
+// withReasoningItems merges the reasoning items into the terminal output
+// array at their announced output indexes. items is the assembler's
+// rendering of the message and function_call items in announcement order;
+// every announced index renders exactly one item, so filling the
+// non-reasoning slots in order reproduces the streamed indexes (the W4
+// invariant: terminal output order equals announcement order).
+func (sc *StreamConverter) withReasoningItems(items []any) []any {
+	if len(sc.rsItems) == 0 {
+		return items
+	}
+	out := make([]any, 0, len(items)+len(sc.rsItems))
+	rs := sc.rsItems
+	for len(rs) > 0 || len(items) > 0 {
+		if len(rs) > 0 && (rs[0].index <= len(out) || len(items) == 0) {
+			out = append(out, shared.NewRespReasoningItem(rs[0].id, rs[0].text.String()))
+			rs = rs[1:]
+			continue
+		}
+		out = append(out, items[0])
+		items = items[1:]
+	}
+	return out
 }

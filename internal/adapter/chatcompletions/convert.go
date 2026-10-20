@@ -159,10 +159,11 @@ func claudeToolUseBlocks(calls []shared.CCToolCall) ([]claudeBlock, *errclass.Er
 // ---- Chat Completions -> openai-response (Responses) (FR-006) ----
 
 // chatToResponses converts a Chat Completions result into Responses
-// output items: text content becomes an assistant output_text message
-// item, tool_calls become function_call items, finish_reason length maps
-// to status incomplete, and prompt/completion tokens map to input/output
-// usage (FR-006).
+// output items: reasoning_content becomes a leading reasoning item (summary
+// form), text content becomes an assistant output_text message item,
+// tool_calls become function_call items, finish_reason length maps to
+// status incomplete, and prompt/completion tokens (plus cached and
+// reasoning token details) map to input/output usage (FR-006).
 func chatToResponses(body []byte, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
 	resp, eErr := decodeCC(body)
 	if eErr != nil {
@@ -199,6 +200,10 @@ func chatToResponses(body []byte, tools ...*shared.ResponseTools) ([]byte, *errc
 		oa.AppendFunctionCall(tc.ID, tc.Function.Name, shared.DefaultArgs(tc.Function.Arguments))
 	}
 	out.Output = oa.Render()
+	if item, ok := reasoningOutputItem(resp.ID, choice.Message.reasoningText()); ok {
+		// Reasoning leads the output, ahead of the message and function calls.
+		out.Output = append([]any{item}, out.Output...)
+	}
 	if resp.Usage != nil {
 		var details shared.UsageDetails
 		if resp.Usage.PromptDetails != nil {

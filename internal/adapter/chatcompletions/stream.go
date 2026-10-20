@@ -459,7 +459,11 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		return events, nil
 	}
 	choice := chunk.Choices[0]
+	if text := choice.Delta.reasoningText(); text != "" {
+		events = append(events, sc.responsesReasoning(text)...) // reasoning.go
+	}
 	if choice.Delta.Content != "" {
+		events = append(events, sc.closeReasoning()...)
 		if sc.msgIndex < 0 {
 			sc.msgIndex = sc.nextIndex
 			sc.nextIndex++
@@ -469,6 +473,9 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		}
 		sc.respText.WriteString(choice.Delta.Content)
 		events = append(events, sc.responsesEm().TextDelta(sc.id, sc.msgIndex, choice.Delta.Content))
+	}
+	if len(choice.Delta.ToolCalls) > 0 {
+		events = append(events, sc.closeReasoning()...)
 	}
 	for _, tc := range choice.Delta.ToolCalls {
 		t := sc.tools[tc.Index]
@@ -564,9 +571,11 @@ func (sc *StreamConverter) responsesTerminal() [][]byte {
 		}
 	}
 	usage := shared.NewResponsesUsageFrom(input, outputTokens, details)
-	items := oa.Render()
+	// Reasoning items keep their announced slots; one still streaming
+	// completes before the remaining done events (reasoning.go).
+	items := sc.withReasoningItems(oa.Render())
 	em := sc.responsesEm()
-	var events [][]byte
+	events := sc.closeReasoning()
 	for idx, item := range items {
 		v, ok := item.(shared.RespItem)
 		if !ok {
