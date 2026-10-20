@@ -74,6 +74,42 @@ func TestClaudeMessagesKeepsOtherFieldsAndHTML(t *testing.T) {
 	}
 }
 
+func TestResponsesNoopReturnsInput(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5-codex","instructions":"You are Codex.","stream":true,"tool_choice":"auto",
+	  "tools":[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"custom","name":"apply_patch"},
+	           {"type":"namespace","name":"mcp","tools":[{"type":"function","name":"echo"}]}],
+	  "input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"rules <x> & y"}]},
+	    {"role":"user","content":"hi"},
+	    {"type":"message","role":"user","content":[{"type":"input_text","text":"see"},{"type":"input_image","image_url":"data:image/png;base64,QUJD"}]},
+	    {"type":"reasoning","summary":[],"encrypted_content":"gAAA"},
+	    {"type":"function_call","call_id":"c","name":"shell","arguments":"{}"},
+	    {"type":"function_call_output","call_id":"c","output":[{"type":"input_text","text":"ok"}]},
+	    {"type":"custom_tool_call","call_id":"d","name":"apply_patch","input":"x"},
+	    {"type":"custom_tool_call_output","call_id":"d","output":"done"},
+	    {"type":"additional_tools","tools":[{"type":"function","name":"more"}]},
+	    {"type":"message","role":"assistant","content":[{"type":"output_text","text":"fine"}]}]}`)
+	if out := Responses(body); !sameSlice(body, out) {
+		t.Fatalf("rewrote a clean request:\n%s", out)
+	}
+}
+
+func TestResponsesLeavesMalformedInputAlone(t *testing.T) {
+	for _, body := range []string{
+		``, `null`, `[]`, `{`,
+		`{"input":"just text"}`,
+		`{"input":[42,"x"]}`,
+		`{"input":[{"type":"message","role":"robot","content":[{"type":"input_video"}]}]}`,
+		`{"input":[{"type":"message","role":"user","content":[{"type":"input_image"}]}]}`,
+		`{"input":[{"type":"function_call_output","call_id":"c","output":[7]}]}`,
+		`{"tools":"x","tool_choice":{"type":"function","name":"f"}}`,
+	} {
+		b := []byte(body)
+		if out := Responses(b); !sameSlice(b, out) {
+			t.Fatalf("%s: rewritten to %s", body, out)
+		}
+	}
+}
+
 func TestDocumentTextTruncated(t *testing.T) {
 	long := strings.Repeat("ab", maxDocChars) // twice the cap
 	d := doc{title: "big.txt", text: long, hasText: true}

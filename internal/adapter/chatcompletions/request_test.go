@@ -671,7 +671,6 @@ func TestBuildRequestResponsesErrors(t *testing.T) {
 		{"malformed json", `{`},
 		{"instructions not a string", `{"instructions":5}`},
 		{"input wrong shape", `{"input":5}`},
-		{"system with image part", `{"input":[{"type":"message","role":"system","content":[{"type":"input_image","image_url":{"url":"https://x"}}]}]}`},
 		{"image missing url", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image"}]}]}`},
 		{"malformed content", `{"input":[{"type":"message","role":"user","content":{"bad":1}}]}`},
 		{"developer content wrong shape", `{"input":[{"type":"message","role":"developer","content":{"bad":1}}]}`},
@@ -684,12 +683,12 @@ func TestBuildRequestResponsesErrors(t *testing.T) {
 			}
 		})
 	}
-	// Unknown roles, content part types, and input item types are
-	// unsupported_protocol_or_parameter (FR-009 kernel), not translation.
+	// Unknown roles are unsupported_protocol_or_parameter (FR-009 kernel),
+	// not translation. Unknown content part and input item types, and
+	// images in system messages, are rewritten by sanitize instead (see
+	// request_sanitize_test.go).
 	for _, tc := range []struct{ name, body string }{
 		{"unsupported role", `{"input":[{"type":"message","role":"robot","content":"x"}]}`},
-		{"unsupported part type", `{"input":[{"type":"message","role":"user","content":[{"type":"audio"}]}]}`},
-		{"unsupported item type", `{"input":[{"type":"web_search"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, eErr := BuildRequest("m", "openai-response", []byte(tc.body), nil)

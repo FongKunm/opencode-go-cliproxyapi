@@ -344,6 +344,7 @@ func claudeAssistantMessage(m *shared.ClaudeMessageRecord) (*ccMessage, *errclas
 // reasoning items are omitted (no CC equivalent; FR-005 explicit omission
 // policy).
 func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport, tools *shared.ResponseTools) ([]byte, *errclass.Error) {
+	body = sanitize.Responses(body) // history this route cannot represent becomes text
 	var src shared.ResponsesRequest
 	if err := json.Unmarshal(body, &src); err != nil {
 		return nil, errclass.Translation("malformed openai-response request JSON: " + err.Error())

@@ -505,3 +505,296 @@ func TestSanitizeClaudeCodeReadsPDFScenario(t *testing.T) {
 		t.Fatalf("last turn = %v", msgs[5])
 	}
 }
+
+// ---- Responses (Codex) ----
+
+func respInput(items string) string {
+	return `{"model":"x","instructions":"Be helpful.","input":[` + items + `]}`
+}
+
+func TestSanitizeResponsesItems(t *testing.T) {
+	cases := []struct {
+		name, items string
+		want        []string // role:text of each message after the system message
+	}{
+		{"web search calls merge across reasoning",
+			`{"type":"message","role":"user","content":"news?"},` +
+				`{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"gAAAA"},` +
+				`{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"go 1.27","sources":[{"type":"url","url":"https://go.dev/doc/go1.27"}]}},` +
+				`{"type":"reasoning","id":"rs_2","summary":[]},` +
+				`{"type":"web_search_call","id":"ws_2","status":"completed","action":{"type":"open_page","url":"https://go.dev/blog"}},` +
+				`{"type":"web_search_call","id":"ws_3","status":"completed","action":{"type":"find","url":"https://go.dev/blog","pattern":"generics"}},` +
+				`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Go 1.27 is out."}]}`,
+			[]string{"user:news?",
+				"assistant:[Web search: go 1.27]\nSources:\n- https://go.dev/doc/go1.27\n\n[Opened web page: https://go.dev/blog]\n\n[Searched https://go.dev/blog for: generics]",
+				"assistant:Go 1.27 is out."}},
+		{"web search without action",
+			`{"type":"web_search_call","id":"ws","status":"completed"}`,
+			[]string{"assistant:[Web search]"}},
+		{"local shell call and output",
+			`{"type":"local_shell_call","id":"lsh","call_id":"c1","status":"completed","action":{"type":"exec","command":["ls","-la"],"working_directory":"/repo"}},` +
+				`{"type":"local_shell_call_output","id":"lsh","call_id":"c1","output":"a.go\nb.go"}`,
+			[]string{"assistant:[Local shell command: ls -la] (in /repo)", "user:[Local shell output]\na.go\nb.go"}},
+		{"shell call and output",
+			`{"type":"shell_call","call_id":"s1","action":{"commands":["go test ./...","git status"]}},` +
+				`{"type":"shell_call_output","call_id":"s1","output":[{"stdout":"ok","stderr":"warn","outcome":{"type":"exit","exit_code":1}},{"stdout":"","outcome":{"type":"timeout"}}]}`,
+			[]string{"assistant:[Shell command]\n$ go test ./...\n$ git status", "user:[Shell output]\nok\nstderr:\nwarn\n(exit code 1)\n(timed out)"}},
+		{"apply_patch call and output",
+			`{"type":"apply_patch_call","call_id":"p1","status":"completed","operation":{"type":"update_file","path":"main.go","diff":"@@\n-a\n+b"}},` +
+				`{"type":"apply_patch_call_output","call_id":"p1","status":"completed","output":"Done"}`,
+			[]string{"assistant:[apply_patch: update_file main.go]\n@@\n-a\n+b", "user:[apply_patch result: completed]\nDone"}},
+		{"computer use",
+			`{"type":"computer_call","call_id":"cc","action":{"type":"click","x":10,"y":20},"pending_safety_checks":[]},` +
+				`{"type":"computer_call_output","call_id":"cc","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,QUJD"}}`,
+			[]string{`assistant:[Computer action: {"type":"click","x":10,"y":20}]`, "user:[Computer screenshot omitted]"}},
+		{"image generation",
+			`{"type":"image_generation_call","id":"ig","status":"completed","revised_prompt":"a red fox","result":"iVBORw0KGgoAAAANSUhEUg"}`,
+			[]string{"assistant:[Generated an image: a red fox]"}},
+		{"code interpreter",
+			`{"type":"code_interpreter_call","id":"ci","container_id":"cntr","code":"print(2+2)","outputs":[{"type":"logs","logs":"4"},{"type":"image","url":"https://x/p.png"}]}`,
+			[]string{"assistant:[Code interpreter]\nprint(2+2)\nOutput:\n4\n[output image omitted]"}},
+		{"file search",
+			`{"type":"file_search_call","id":"fs","queries":["refund policy"],"results":[{"file_id":"f1","filename":"policy.md","text":"Refunds within 30 days","score":0.9}]}`,
+			[]string{"assistant:[File search: refund policy]\n1. policy.md: Refunds within 30 days"}},
+		{"mcp items",
+			`{"type":"mcp_list_tools","id":"ml","server_label":"deepwiki","tools":[{"name":"ask","input_schema":{}},{"name":"read","input_schema":{}}]},` +
+				`{"type":"mcp_approval_request","id":"ar","server_label":"deepwiki","name":"ask","arguments":"{\"q\":\"x\"}"},` +
+				`{"type":"mcp_approval_response","approval_request_id":"ar","approve":true},` +
+				`{"type":"mcp_call","id":"mc","server_label":"deepwiki","name":"ask","arguments":"{\"q\":\"x\"}","output":"answer"},` +
+				`{"type":"mcp_call","id":"mc2","server_label":"deepwiki","name":"read","arguments":"{}","error":"timeout"}`,
+			[]string{"assistant:[MCP server deepwiki tools: ask, read]\n\n[MCP approval requested: deepwiki/ask {\"q\":\"x\"}]",
+				"user:[MCP approval: approved]",
+				"assistant:[MCP tool call: deepwiki/ask {\"q\":\"x\"}]\nanswer\n\n[MCP tool call: deepwiki/read {}]\nError: timeout"}},
+		{"item reference dropped",
+			`{"type":"message","role":"user","content":"a"},{"type":"item_reference","id":"msg_123"},{"type":"message","role":"user","content":"b"}`,
+			[]string{"user:a", "user:b"}},
+		{"unknown future items",
+			`{"type":"hologram_call","id":"h"},{"type":"hologram_call_output","call_id":"h"}`,
+			[]string{"assistant:[hologram_call item omitted]", "user:[hologram_call_output item omitted]"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, msgs := ccMsgs(t, "openai-response", respInput(c.items))
+			if msgs[0]["role"] != "system" || msgs[0]["content"] != "Be helpful." {
+				t.Fatalf("system = %v", msgs[0])
+			}
+			var got []string
+			for _, m := range msgs[1:] {
+				got = append(got, m["role"].(string)+":"+textOf(m))
+			}
+			if g, w := strings.Join(got, "\n---\n"), strings.Join(c.want, "\n---\n"); g != w {
+				t.Fatalf("messages:\n%s\nwant:\n%s", g, w)
+			}
+			wantNone(t, strings.Join(got, "\n"), "gAAAA", "iVBORw0K", "QUJD")
+		})
+	}
+}
+
+func TestSanitizeResponsesCompaction(t *testing.T) {
+	_, msgs := ccMsgs(t, "openai-response", respInput(
+		`{"type":"compaction","encrypted_content":"gAAAAABo-encrypted"},{"type":"message","role":"user","content":"continue"}`))
+	if len(msgs) != 2 || msgs[1]["content"] != "continue" {
+		t.Fatalf("messages = %v", msgs)
+	}
+	wantAll(t, msgs[0]["content"].(string), "Be helpful.\n\n[Note: part of the earlier conversation was compacted")
+	wantNone(t, msgs[0]["content"].(string), "gAAAA")
+
+	// Without instructions the note becomes the system message.
+	_, msgs = ccMsgs(t, "openai-response", `{"input":[{"type":"compaction_summary","encrypted_content":"x"},{"type":"message","role":"user","content":"go"}]}`)
+	if len(msgs) != 2 || msgs[0]["role"] != "system" || !strings.HasPrefix(msgs[0]["content"].(string), "[Note: part of the earlier") {
+		t.Fatalf("messages = %v", msgs)
+	}
+}
+
+func TestSanitizeResponsesMessageParts(t *testing.T) {
+	pdf := pdfB64("Invoice 42", "Total: 99 USD")
+	cases := []struct {
+		name, item, role string
+		want             []string
+	}{
+		{"input_file PDF", `{"type":"message","role":"user","content":[{"type":"input_text","text":"summarize"},{"type":"input_file","filename":"invoice.pdf","file_data":"data:application/pdf;base64,` + pdf + `"}]}`,
+			"user", []string{"summarize", "[Document: invoice.pdf (PDF, 1 page)]\nInvoice 42\nTotal: 99 USD"}},
+		{"input_file by id", `{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-abc"}]}`,
+			"user", []string{"(The document is an uploaded file (file-abc) that is not available here.)"}},
+		{"image by file id", `{"type":"message","role":"user","content":[{"type":"input_text","text":"see"},{"type":"input_image","file_id":"file-img"}]}`,
+			"user", []string{"see", "[image omitted: uploaded file file-img is not available here]"}},
+		{"audio part", `{"type":"message","role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}`,
+			"user", []string{"[input_audio content omitted]"}},
+		{"refusal", `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Sorry."},{"type":"refusal","refusal":"I cannot help with that."}]}`,
+			"assistant", []string{"Sorry.\n\n[Refusal] I cannot help with that."}},
+		{"system image", `{"type":"message","role":"developer","content":[{"type":"input_text","text":"Rules."},{"type":"input_image","image_url":"https://x/i.png"}]}`,
+			"system", []string{"Rules.\n\n[image omitted]"}},
+		{"unknown part", `{"type":"message","role":"user","content":[{"type":"input_video","url":"https://x/v.mp4"}]}`,
+			"user", []string{"[input_video content omitted]"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, msgs := ccMsgs(t, "openai-response", `{"input":[`+c.item+`]}`)
+			if len(msgs) != 1 || msgs[0]["role"] != c.role {
+				t.Fatalf("messages = %v", msgs)
+			}
+			wantAll(t, textOf(msgs[0]), c.want...)
+		})
+	}
+}
+
+func TestSanitizeResponsesToolOutputImagesAndFiles(t *testing.T) {
+	// Codex view_image: two parallel calls, the first returns an image.
+	_, msgs := ccMsgs(t, "openai-response", `{"input":[`+
+		`{"type":"message","role":"user","content":"look at both"},`+
+		`{"type":"function_call","call_id":"call_a","name":"view_image","arguments":"{\"path\":\"a.png\"}"},`+
+		`{"type":"function_call","call_id":"call_b","name":"shell","arguments":"{\"cmd\":\"ls\"}"},`+
+		`{"type":"function_call_output","call_id":"call_a","output":[{"type":"input_image","image_url":"data:image/png;base64,QUJD"}]},`+
+		`{"type":"function_call_output","call_id":"call_b","output":"a.png"},`+
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`)
+	if len(msgs) != 6 {
+		t.Fatalf("got %d messages: %v", len(msgs), msgs)
+	}
+	if calls, _ := msgs[1]["tool_calls"].([]any); len(calls) != 2 {
+		t.Fatalf("tool calls = %v", msgs[1])
+	}
+	if msgs[2]["role"] != "tool" || msgs[2]["tool_call_id"] != "call_a" ||
+		msgs[2]["content"] != "[Images from this tool result are in the following user message, labeled with tool_call_id call_a.]" {
+		t.Fatalf("image tool output = %v", msgs[2])
+	}
+	if msgs[3]["role"] != "tool" || msgs[3]["content"] != "a.png" {
+		t.Fatalf("second tool output = %v (tool replies must stay adjacent)", msgs[3])
+	}
+	if msgs[4]["role"] != "user" || textOf(msgs[4]) != "Tool result images for tool_call_id call_a:" ||
+		len(imageURLs(msgs[4])) != 1 || imageURLs(msgs[4])[0] != "data:image/png;base64,QUJD" {
+		t.Fatalf("image message = %v", msgs[4])
+	}
+	if textOf(msgs[5]) != "done" {
+		t.Fatalf("last = %v", msgs[5])
+	}
+
+	// Files become text; images known only by file id become markers.
+	_, msgs = ccMsgs(t, "openai-response", `{"input":[`+
+		`{"type":"function_call","call_id":"c","name":"fetch","arguments":"{}"},`+
+		`{"type":"function_call_output","call_id":"c","output":[{"type":"input_text","text":"fetched:"},`+
+		`{"type":"input_file","filename":"spec.pdf","file_data":"data:application/pdf;base64,`+pdfB64("Spec v2")+`"},`+
+		`{"type":"input_image","file_id":"file-9"}]}]}`)
+	if len(msgs) != 2 || msgs[1]["role"] != "tool" {
+		t.Fatalf("messages = %v", msgs)
+	}
+	if got := msgs[1]["content"]; got != "fetched:\n\n[Document: spec.pdf (PDF, 1 page)]\nSpec v2\n\n[image omitted: uploaded file file-9 is not available here]" {
+		t.Fatalf("tool output = %q", got)
+	}
+}
+
+func TestSanitizeResponsesHostedTools(t *testing.T) {
+	body := `{"input":[{"type":"message","role":"user","content":"hi"},` +
+		`{"type":"additional_tools","tools":[{"type":"file_search","vector_store_ids":["vs"]},{"type":"function","name":"extra"}]}],` +
+		`"tool_choice":{"type":"web_search_preview"},"tools":[` +
+		`{"type":"function","name":"shell","parameters":{"type":"object"}},` +
+		`{"type":"custom","name":"grep_tool","format":{"type":"text"}},` +
+		`{"type":"namespace","name":"mcp","tools":[{"type":"function","name":"echo"},{"type":"file_search","vector_store_ids":["vs"]}]},` +
+		`{"type":"namespace","name":"hosted_only","tools":[{"type":"code_interpreter","container":{"type":"auto"}}]},` +
+		`{"type":"web_search"},{"type":"web_search_preview"},{"type":"local_shell"},{"type":"file_search","vector_store_ids":["vs"]},` +
+		`{"type":"mcp","server_label":"x","server_url":"https://x"},{"type":"computer_use_preview","display_width":1,"display_height":1},` +
+		`{"type":"code_interpreter","container":{"type":"auto"}},{"type":"image_generation"},{"type":"shell"},{"type":"apply_patch"}]}`
+	m, _ := ccMsgs(t, "openai-response", body)
+	var names []string
+	for _, tl := range m["tools"].([]any) {
+		names = append(names, tl.(map[string]any)["function"].(map[string]any)["name"].(string))
+	}
+	if got := strings.Join(names, ","); got != "shell,grep_tool,mcp__echo,extra" {
+		t.Fatalf("tools = %s", got)
+	}
+	if m["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice = %v, want auto for a hosted tool type", m["tool_choice"])
+	}
+
+	for _, c := range []struct{ choice, want string }{
+		{`{"type":"custom","name":"grep_tool"}`, `{"function":{"name":"grep_tool"},"type":"function"}`},
+		{`{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"shell"}]}`, `"required"`},
+		{`{"type":"allowed_tools","mode":"auto","tools":[]}`, `"auto"`},
+		{`{"type":"mcp","server_label":"x"}`, `"auto"`},
+		{`"required"`, `"required"`},
+	} {
+		m, _ := ccMsgs(t, "openai-response", `{"input":"hi","tool_choice":`+c.choice+`,"tools":[{"type":"function","name":"shell"},{"type":"custom","name":"grep_tool"}]}`)
+		if got, _ := json.Marshal(m["tool_choice"]); string(got) != c.want {
+			t.Fatalf("tool_choice %s -> %s, want %s", c.choice, got, c.want)
+		}
+	}
+
+	// Only hosted tools: nothing left to choose from.
+	m, _ = ccMsgs(t, "openai-response", `{"input":"hi","tool_choice":"required","tools":[{"type":"web_search"},{"type":"local_shell"}]}`)
+	if _, ok := m["tools"]; ok {
+		t.Fatalf("tools = %v", m["tools"])
+	}
+	if _, ok := m["tool_choice"]; ok {
+		t.Fatalf("tool_choice = %v, want none", m["tool_choice"])
+	}
+}
+
+// TestSanitizeCodexHistoryScenario replays a Codex session that ran on a
+// GPT model (web search, view_image, a compaction, encrypted reasoning,
+// a hosted tool) and continues on a Chat Completions model.
+func TestSanitizeCodexHistoryScenario(t *testing.T) {
+	body := `{
+	  "model": "gpt-5.5-codex",
+	  "instructions": "You are Codex, a coding agent.",
+	  "stream": true,
+	  "store": false,
+	  "include": ["reasoning.encrypted_content"],
+	  "prompt_cache_key": "019a-session",
+	  "reasoning": {"effort": "high", "summary": "auto"},
+	  "tools": [
+	    {"type":"function","name":"shell","description":"Runs a shell command","strict":false,"parameters":{"type":"object","properties":{"command":{"type":"array","items":{"type":"string"}}},"required":["command"]}},
+	    {"type":"function","name":"view_image","description":"Attach a local image","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
+	    {"type":"custom","name":"apply_patch","description":"Apply a patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}},
+	    {"type":"web_search"}
+	  ],
+	  "tool_choice": "auto",
+	  "parallel_tool_calls": false,
+	  "input": [
+	    {"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>sandbox: workspace-write</permissions instructions>"}]},
+	    {"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context><cwd>/repo</cwd></environment_context>"}]},
+	    {"type":"compaction","encrypted_content":"gAAAAABpY2NvbXBhY3RlZC1oaXN0b3J5"},
+	    {"type":"message","role":"user","content":[{"type":"input_text","text":"Why does the screenshot show a 500? Check the docs too."}]},
+	    {"type":"reasoning","id":"rs_01","summary":[{"type":"summary_text","text":"Look at the screenshot."}],"encrypted_content":"gAAAAABreasoning1"},
+	    {"type":"function_call","id":"fc_01","call_id":"call_img","name":"view_image","arguments":"{\"path\":\"/repo/err.png\"}"},
+	    {"type":"function_call_output","call_id":"call_img","output":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}]},
+	    {"type":"reasoning","id":"rs_02","summary":[],"encrypted_content":"gAAAAABreasoning2"},
+	    {"type":"web_search_call","id":"ws_01","status":"completed","action":{"type":"search","query":"nginx 500 upstream prematurely closed connection"}},
+	    {"type":"message","role":"assistant","id":"msg_01","content":[{"type":"output_text","text":"The upstream closed the connection early; raise proxy_read_timeout.","annotations":[]}]},
+	    {"type":"custom_tool_call","id":"ctc_01","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},
+	    {"type":"custom_tool_call_output","call_id":"call_patch","output":"Success."},
+	    {"type":"message","role":"user","content":[{"type":"input_text","text":"Thanks, now run the tests."}]}
+	  ]
+	}`
+	m, msgs := ccMsgs(t, "openai-response", body)
+	var roles []string
+	for _, msg := range msgs {
+		roles = append(roles, msg["role"].(string))
+	}
+	if got := strings.Join(roles, ","); got != "system,system,user,user,assistant,tool,user,assistant,assistant,assistant,tool,user" {
+		t.Fatalf("roles = %s", got)
+	}
+	wantAll(t, msgs[0]["content"].(string), "You are Codex", "[Note: part of the earlier conversation was compacted")
+	wantAll(t, textOf(msgs[3]), "Why does the screenshot show a 500?")
+	if msgs[5]["tool_call_id"] != "call_img" || !strings.Contains(msgs[5]["content"].(string), "tool_call_id call_img") {
+		t.Fatalf("view_image output = %v", msgs[5])
+	}
+	if urls := imageURLs(msgs[6]); len(urls) != 1 || urls[0] != "data:image/png;base64,iVBORw0KGgo=" {
+		t.Fatalf("image message = %v", msgs[6])
+	}
+	wantAll(t, textOf(msgs[7]), "[Web search: nginx 500 upstream prematurely closed connection]")
+	wantAll(t, textOf(msgs[8]), "raise proxy_read_timeout")
+	if calls, _ := msgs[9]["tool_calls"].([]any); len(calls) != 1 {
+		t.Fatalf("apply_patch call = %v", msgs[9])
+	}
+	if msgs[10]["tool_call_id"] != "call_patch" || msgs[10]["content"] != "Success." || textOf(msgs[11]) != "Thanks, now run the tests." {
+		t.Fatalf("tail = %v / %v", msgs[10], msgs[11])
+	}
+	all, _ := json.Marshal(msgs)
+	wantNone(t, string(all), "gAAAA", "encrypted_content", "summary_text")
+	var names []string
+	for _, tl := range m["tools"].([]any) {
+		names = append(names, tl.(map[string]any)["function"].(map[string]any)["name"].(string))
+	}
+	if got := strings.Join(names, ","); got != "shell,view_image" {
+		t.Fatalf("tools = %s", got)
+	}
+}
