@@ -69,11 +69,9 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 		rec, found = mgr.Lookup(req.Model)
 	}
 	if !found {
-		return nil, classEnvelope(&errclass.Error{
-			Class:      errclass.ClassInvalidModel,
-			Message:    "model not in routable catalog",
-			StatusCode: http.StatusNotFound,
-		})
+		// 400, not 404: see errclass.UnknownModel (a 404 makes CPA cool the
+		// model down for 12 hours).
+		return nil, classEnvelope(errclass.UnknownModel(req.Model))
 	}
 	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools()}, nil
 }

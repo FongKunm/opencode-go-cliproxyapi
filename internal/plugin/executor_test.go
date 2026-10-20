@@ -421,10 +421,39 @@ func TestExecuteChatRoute(t *testing.T) {
 	}
 }
 
-func TestExecuteUnknownModelIs404Envelope(t *testing.T) {
-	m, _ := newExecManager(t)
+// An unknown model is a 400 request fault, never a 404: CPA cools a model
+// down for 12 hours on a 404 (see errclass.UnknownModel).
+func TestExecuteUnknownModelIs400Envelope(t *testing.T) {
+	m, f := newExecManager(t)
 	env := mustExecute(t, m, "opencode-go/nope", "openai", []byte(ccRequestBody))
-	if env.OK || env.Error == nil || env.Error.Code != "invalid_model" || env.Error.HTTPStatus != http.StatusNotFound {
+	if env.OK || env.Error == nil || env.Error.Code != "invalid_model" || env.Error.HTTPStatus != http.StatusBadRequest ||
+		env.Error.Retryable || !strings.Contains(env.Error.Message, `"opencode-go/nope"`) {
+		t.Fatalf("envelope = %+v", env.Error)
+	}
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBody("opencode-go/nope", "claude", []byte(ccRequestBody), "down-x"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); env.OK || env.Error == nil || env.Error.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("stream envelope = %+v", env.Error)
+	}
+	if n := len(f.callsOf(pluginabi.MethodHostHTTPDoStream)); n != 0 {
+		t.Fatalf("an unknown model must never reach upstream: %d stream opens", n)
+	}
+}
+
+// An empty catalog (initial refresh failed) answers 400 too, so a catalog
+// outage cannot get every model cooled down by the host.
+func TestExecuteWithEmptyCatalogIs400Envelope(t *testing.T) {
+	f := &fakeCaller{responder: catalogResponder(false, "")}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	env := mustExecute(t, m, "opencode-go/glm-5.3", "openai", []byte(ccRequestBody))
+	if env.OK || env.Error == nil || env.Error.Code != "invalid_model" || env.Error.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
 }
