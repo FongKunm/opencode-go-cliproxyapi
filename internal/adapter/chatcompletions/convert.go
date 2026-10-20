@@ -13,6 +13,7 @@ import (
 type ccRespMessage struct {
 	Content   json.RawMessage     `json:"content"` // JSON string or part array
 	ToolCalls []shared.CCToolCall `json:"tool_calls"`
+	ccReasoning
 }
 
 type ccChoice struct {
@@ -86,10 +87,11 @@ func passthroughResponse(body []byte) ([]byte, *errclass.Error) {
 // ---- Chat Completions -> claude (Anthropic Messages) (FR-006) ----
 
 // chatToClaude converts a Chat Completions result into a Messages
-// response via the shared Claude-result kernel: content becomes text or
-// image blocks, tool_calls become tool_use blocks, finish_reason maps to
-// stop_reason, and prompt/completion token counts map to input/output
-// usage (FR-006, AC §B).
+// response via the shared Claude-result kernel: reasoning_content becomes
+// a leading thinking block, content becomes text or image blocks,
+// tool_calls become tool_use blocks, finish_reason maps to stop_reason,
+// and prompt/completion token counts map to input/output usage (FR-006,
+// AC §B).
 func chatToClaude(body []byte) ([]byte, *errclass.Error) {
 	resp, eErr := decodeCC(body)
 	if eErr != nil {
@@ -116,8 +118,13 @@ func chatToClaude(body []byte) ([]byte, *errclass.Error) {
 	// length cannot downgrade tool_calls to max_tokens.
 	stop := shared.TerminalReason(len(choice.Message.ToolCalls) > 0,
 		"tool_use", shared.FinishToClaudeStop(choice.FinishReason))
+	var content []claudeBlock
+	if text := choice.Message.reasoningText(); text != "" {
+		content = append(content, claudeThinkingBlock(text))
+	}
+	content = append(append(content, blocks...), toolUse...)
 	b, _ := json.Marshal(shared.NewClaudeResult(resp.ID, resp.Model, stop,
-		shared.ClampSubtract(inputTokens, cacheRead), outputTokens, cacheRead, nil, append(blocks, toolUse...)))
+		shared.ClampSubtract(inputTokens, cacheRead), outputTokens, cacheRead, nil, content))
 	return b, nil // only marshallable composed types; cannot fail
 }
 
@@ -152,10 +159,11 @@ func claudeToolUseBlocks(calls []shared.CCToolCall) ([]claudeBlock, *errclass.Er
 // ---- Chat Completions -> openai-response (Responses) (FR-006) ----
 
 // chatToResponses converts a Chat Completions result into Responses
-// output items: text content becomes an assistant output_text message
-// item, tool_calls become function_call items, finish_reason length maps
-// to status incomplete, and prompt/completion tokens map to input/output
-// usage (FR-006).
+// output items: reasoning_content becomes a leading reasoning item (summary
+// form), text content becomes an assistant output_text message item,
+// tool_calls become function_call items, finish_reason length maps to
+// status incomplete, and prompt/completion tokens (plus cached and
+// reasoning token details) map to input/output usage (FR-006).
 func chatToResponses(body []byte, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
 	resp, eErr := decodeCC(body)
 	if eErr != nil {
@@ -192,6 +200,10 @@ func chatToResponses(body []byte, tools ...*shared.ResponseTools) ([]byte, *errc
 		oa.AppendFunctionCall(tc.ID, tc.Function.Name, shared.DefaultArgs(tc.Function.Arguments))
 	}
 	out.Output = oa.Render()
+	if item, ok := reasoningOutputItem(resp.ID, choice.Message.reasoningText()); ok {
+		// Reasoning leads the output, ahead of the message and function calls.
+		out.Output = append([]any{item}, out.Output...)
+	}
 	if resp.Usage != nil {
 		var details shared.UsageDetails
 		if resp.Usage.PromptDetails != nil {
