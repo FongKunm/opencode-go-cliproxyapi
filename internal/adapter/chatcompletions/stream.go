@@ -43,6 +43,8 @@ type StreamConverter struct {
 	flushed      bool            // Flush already ran (one-shot guard)
 	respText     strings.Builder // openai-response accumulated output_text
 	respTools    *shared.ResponseTools
+
+	reasoningState // upstream reasoning rendered for the client (reasoning.go)
 }
 
 // streamTool accumulates one upstream tool_calls index; args collects
@@ -192,6 +194,7 @@ type ccToolCallDelta struct {
 type ccDelta struct {
 	Content   string            `json:"content"`
 	ToolCalls []ccToolCallDelta `json:"tool_calls"`
+	ccReasoning
 }
 
 type ccChunkChoice struct {
@@ -313,6 +316,11 @@ func (sc *StreamConverter) claudeLine(line string) ([][]byte, *errclass.Error) {
 		return events, nil
 	}
 	choice := chunk.Choices[0]
+	if text := choice.Delta.reasoningText(); text != "" {
+		// Reasoning precedes content: it renders as a thinking block that
+		// the text/tool_use starts below close (reasoning.go).
+		events = append(events, sc.claudeReasoning(text)...)
+	}
 	if choice.Delta.Content != "" {
 		// The text block opens lazily on first non-empty content so pure
 		// tool-call streams carry no phantom empty text block, matching
@@ -394,11 +402,12 @@ func (sc *StreamConverter) stopText() [][]byte {
 	return [][]byte{sc.claudeEm.ContentBlockStop(sc.textIndex)}
 }
 
-// stopBlocks closes the text block and every open tool_use block
-// exactly once; called before every content_block_start (so blocks never
-// overlap) and again (as a no-op) on finish_reason and [DONE].
+// stopBlocks closes the thinking block, the text block, and every open
+// tool_use block exactly once; called before every content_block_start (so
+// blocks never overlap) and again (as a no-op) on finish_reason and [DONE].
 func (sc *StreamConverter) stopBlocks() [][]byte {
 	var events [][]byte
+	events = append(events, sc.stopThinking()...)
 	events = append(events, sc.stopText()...)
 	for _, idx := range sc.toolOrder {
 		t := sc.tools[idx]
