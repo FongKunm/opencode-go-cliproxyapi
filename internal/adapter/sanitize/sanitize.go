@@ -23,42 +23,58 @@ import (
 	"strings"
 )
 
-// object decodes raw as a JSON object.
+// object splits raw as a JSON object; values are sub-slices of raw and a
+// repeated key keeps its last value, as with encoding/json.
 func object(raw json.RawMessage) (map[string]json.RawMessage, bool) {
-	var m map[string]json.RawMessage
-	if json.Unmarshal(raw, &m) != nil || m == nil {
+	m := make(map[string]json.RawMessage)
+	ok := splitObject(raw, func(key, val []byte) {
+		k, isStr := decodeString(key)
+		if !isStr {
+			k = string(key)
+		}
+		m[k] = val[:len(val):len(val)]
+	})
+	if !ok {
 		return nil, false
 	}
 	return m, true
 }
 
-// array decodes raw as a JSON array.
+// array splits raw as a JSON array; elements are sub-slices of raw.
 func array(raw json.RawMessage) ([]json.RawMessage, bool) {
-	var a []json.RawMessage
-	if json.Unmarshal(raw, &a) != nil || a == nil {
-		return nil, false
-	}
-	return a, true
+	return splitArray(raw)
+}
+
+// field returns member name of the JSON object raw the way the
+// translator's struct decoding finds it: keys match case-insensitively and
+// the last match wins.
+func field(raw json.RawMessage, name string) (json.RawMessage, bool) {
+	var val json.RawMessage
+	found := false
+	splitObject(raw, func(key, v []byte) {
+		if keyIs(key, name) || foldKeyIs(key, name) {
+			val, found = v, true
+		}
+	})
+	return val, found
+}
+
+func foldKeyIs(key []byte, name string) bool {
+	k, ok := decodeString(key)
+	return ok && strings.EqualFold(k, name)
 }
 
 // typeOf returns the "type" member of a JSON object, or "" when raw is not
 // an object or has no string type.
 func typeOf(raw json.RawMessage) string {
-	var v struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(raw, &v) != nil {
-		return ""
-	}
-	return v.Type
+	v, _ := field(raw, "type")
+	s, _ := decodeString(v)
+	return s
 }
 
 // str returns the string member key of m, or "".
 func str(m map[string]json.RawMessage, key string) string {
-	var s string
-	if raw, ok := m[key]; ok {
-		json.Unmarshal(raw, &s)
-	}
+	s, _ := decodeString(m[key])
 	return s
 }
 
@@ -78,7 +94,21 @@ func compact(raw json.RawMessage) string {
 	return strings.TrimSpace(b.String())
 }
 
-// marshal encodes values this package composes; they always encode.
+// encodeOr re-encodes a rewritten request, or returns fallback when that
+// fails: values split out of malformed input do not survive re-encoding,
+// and the translator then reports the original body as before.
+func encodeOr(v any, fallback []byte) []byte {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if enc.Encode(v) != nil {
+		return fallback
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
+}
+
+// marshal encodes values this package composes. A value carrying an
+// invalid raw element encodes to invalid JSON, which encodeOr rejects.
 func marshal(v any) json.RawMessage {
 	var b strings.Builder
 	enc := json.NewEncoder(&b)
@@ -96,25 +126,38 @@ func omitted(kind string) string {
 }
 
 // piece is one element of a rewritten content array: an original element
-// kept verbatim, or text — original or synthesized — that may be merged
-// with its neighbours.
+// kept verbatim, or text — original or synthesized — that may need a
+// separator from its neighbours.
 type piece struct {
-	raw    json.RawMessage // element to emit verbatim when not merged
-	text   string          // text of a text piece
-	isText bool
-	synth  bool // produced by this package
+	raw     json.RawMessage // element to emit verbatim
+	text    string          // text, when hasText
+	hasText bool            // text is set (otherwise read from raw on demand)
+	isText  bool            // the element counts as text where text is joined
+	synth   bool            // produced by this package
 }
 
 func keep(raw json.RawMessage) piece { return piece{raw: raw} }
 
-func synthText(s string) piece { return piece{text: s, isText: true, synth: true} }
+func synthText(s string) piece { return piece{text: s, hasText: true, isText: true, synth: true} }
 
-// origText wraps an original text element, keeping its bytes for when it
-// is not merged.
-func origText(raw json.RawMessage) piece {
-	m, _ := object(raw)
-	return piece{raw: raw, text: str(m, "text"), isText: true}
+// origText wraps an original text element. Its text is only decoded if it
+// has to be re-emitted with a separator.
+func origText(raw json.RawMessage) piece { return piece{raw: raw, isText: true} }
+
+// value returns the text of a text piece.
+func (p piece) value() string {
+	if p.hasText {
+		return p.text
+	}
+	v, _ := field(p.raw, "text")
+	s, _ := decodeString(v)
+	return s
 }
+
+// nonEmpty reports whether a text piece has text; original elements are
+// assumed to (decoding them just to check would cost more than an extra
+// separator in the rare case they are empty).
+func (p piece) nonEmpty() bool { return !p.hasText || p.text != "" }
 
 // assemble renders pieces into a content array; textType names the element
 // type of synthesized text ("text", "input_text", "output_text").
@@ -132,14 +175,14 @@ func assemble(pieces []piece, sep bool, textType string) json.RawMessage {
 			continue
 		}
 		switch {
-		case sep && wrote && p.text != "" && (p.synth || prevSynth):
-			out = append(out, textElem(textType, "\n\n"+p.text))
+		case sep && wrote && p.nonEmpty() && (p.synth || prevSynth):
+			out = append(out, textElem(textType, "\n\n"+p.value()))
 		case p.synth:
 			out = append(out, textElem(textType, p.text))
 		default:
 			out = append(out, p.raw)
 		}
-		if p.text != "" {
+		if p.nonEmpty() {
 			wrote, prevSynth = true, p.synth
 		}
 	}

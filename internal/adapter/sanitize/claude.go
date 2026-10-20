@@ -52,7 +52,7 @@ func ClaudeMessages(body []byte) []byte {
 	if !changed {
 		return body
 	}
-	return marshal(req)
+	return encodeOr(req, body)
 }
 
 // claudeSystem rewrites a block-array system field. The translator joins
@@ -90,18 +90,17 @@ func claudeMessages(raw json.RawMessage) (json.RawMessage, bool) {
 	}
 	changed := false
 	for i, msg := range msgs {
-		var head struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		}
-		if json.Unmarshal(msg, &head) != nil {
-			continue
-		}
-		content, ok := claudeContent(head.Content, head.Role)
+		roleRaw, _ := field(msg, "role")
+		role, _ := decodeString(roleRaw)
+		raw, _ := field(msg, "content")
+		content, ok := claudeContent(raw, role)
 		if !ok {
 			continue
 		}
-		m, _ := object(msg)
+		m, ok := object(msg)
+		if !ok {
+			continue // malformed turn: the translator reports it
+		}
 		m["content"] = content
 		msgs[i] = marshal(m)
 		changed = true
@@ -179,7 +178,7 @@ func claudeToolResult(raw json.RawMessage) (json.RawMessage, bool) {
 		case t == "tool_reference":
 			// The translator renders it as text; count it as text so
 			// rewritten neighbours are separated from it.
-			pieces = append(pieces, piece{raw: blk, text: toolReferenceText(blk), isText: true})
+			pieces = append(pieces, piece{raw: blk, text: toolReferenceText(blk), hasText: true, isText: true})
 		case t == "image" && imageKeep(blk):
 			pieces = append(pieces, keep(blk))
 		default:
@@ -260,11 +259,8 @@ func toolReferenceText(raw json.RawMessage) string {
 // Other source types (file references, unknown kinds) are valid but
 // unsupported.
 func imageKeep(raw json.RawMessage) bool {
-	m, ok := object(raw)
-	if !ok {
-		return true
-	}
-	src, ok := object(m["source"])
+	srcRaw, _ := field(raw, "source")
+	src, ok := object(srcRaw)
 	if !ok {
 		return true
 	}

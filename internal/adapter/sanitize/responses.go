@@ -73,7 +73,7 @@ func Responses(body []byte) []byte {
 	if !changed {
 		return body
 	}
-	return marshal(req)
+	return encodeOr(req, body)
 }
 
 func withNote(raw json.RawMessage) (json.RawMessage, bool) {
@@ -284,13 +284,16 @@ func (r *respRewriter) item(raw json.RawMessage) {
 		r.emit(raw) // the translator reports malformed items
 		return
 	}
-	t := str(m, "type")
-	if t == "" && strings.TrimSpace(str(m, "role")) != "" {
+	t := typeOf(raw)
+	roleRaw, _ := field(raw, "role")
+	role, _ := decodeString(roleRaw)
+	if t == "" && strings.TrimSpace(role) != "" {
 		t = "message"
 	}
 	switch t {
 	case "message":
-		if content, ok := respContent(m["content"], str(m, "role")); ok {
+		content, _ := field(raw, "content")
+		if content, ok := respContent(content, role); ok {
 			m["content"] = content
 			raw = marshal(m)
 			r.changed = true
@@ -407,11 +410,12 @@ func respToolOutput(m map[string]json.RawMessage) (json.RawMessage, []json.RawMe
 	var b strings.Builder
 	wrote, prevSynth := false, false
 	for _, p := range pieces {
-		if wrote && p.text != "" && (p.synth || prevSynth) {
+		text := p.value()
+		if wrote && text != "" && (p.synth || prevSynth) {
 			b.WriteString("\n\n")
 		}
-		b.WriteString(p.text)
-		if p.text != "" {
+		b.WriteString(text)
+		if text != "" {
 			wrote, prevSynth = true, p.synth
 		}
 	}
