@@ -86,6 +86,12 @@ type Reader struct {
 	trailerptr objptr
 	key        []byte
 	useAES     bool
+
+	// opencode-go hardening: per-document work budgets (hardening.go).
+	inflated     int64 // decompressed bytes produced so far
+	inflateLimit int64 // budget for inflated; <= 0 means the default
+	cmapEntries  int   // CMap entries parsed so far
+	cmapWork     int64 // comparisons spent decoding CMap text
 }
 
 type xref struct {
@@ -255,6 +261,13 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream missing Size")
 	}
+	// opencode-go hardening: Size sizes an allocation; never trust it blindly.
+	if size < 0 {
+		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream Size %d", size)
+	}
+	if size > maxXrefEntries {
+		return nil, objptr{}, nil, &LimitError{What: "xref stream Size"}
+	}
 	table := make([]xref, size)
 
 	table, err := readXrefStreamData(r, strm, table, size)
@@ -310,10 +323,14 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 		return nil, fmt.Errorf("xref stream missing W array")
 	}
 
+	// opencode-go hardening: the widths size a per-entry buffer.
+	if len(ww) > maxXrefFields {
+		return nil, &LimitError{What: "xref stream W array"}
+	}
 	var w []int
 	for _, x := range ww {
 		i, ok := x.(int64)
-		if !ok || int64(int(i)) != i {
+		if !ok || int64(int(i)) != i || i < 0 || i > maxXrefFieldWidth {
 			return nil, fmt.Errorf("invalid W array %v", objfmt(ww))
 		}
 		w = append(w, int(i))
@@ -381,8 +398,16 @@ func decodeInt(b []byte) int {
 // The previous idiom (repeatedly append(table[:cap(table)], xref{})) was
 // correct but hard to follow, so this replaces it with an explicit resize.
 func ensureXrefLen(table []xref, x int) []xref {
+	// opencode-go hardening: object numbers come from the file and size
+	// the table; reject negative and absurd ones instead of allocating.
+	if x < 0 {
+		panic(fmt.Errorf("malformed PDF: negative object number %d", x))
+	}
 	if x < len(table) {
 		return table
+	}
+	if x >= maxXrefEntries {
+		limitPanic("xref table")
 	}
 	return append(table, make([]xref, x-len(table)+1)...)
 }
@@ -769,6 +794,11 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 				b := newBuffer(strm.Reader(), 0)
 				b.allowEOF = true
 				for i := 0; i < n; i++ {
+					// opencode-go hardening: /N comes from the file; stop at
+					// the end of the stream instead of spinning through it.
+					if b.eof {
+						break
+					}
 					id, _ := b.readToken().(int64)
 					off, _ := b.readToken().(int64)
 					if uint32(id) == ptr.id {
@@ -852,9 +882,17 @@ func (v Value) Reader() io.ReadCloser {
 	case Name:
 		rd = applyFilter(rd, filter.Name(), param)
 	case Array:
+		// opencode-go hardening: every filter wraps another reader.
+		if filter.Len() > maxFilterChain {
+			limitPanic("stream filter chain")
+		}
 		for i := 0; i < filter.Len(); i++ {
 			rd = applyFilter(rd, filter.Index(i).Name(), param.Index(i))
 		}
+	}
+	// opencode-go hardening: charge decoded bytes to the document budget.
+	if filter.Kind() != Null {
+		rd = &inflateBudget{rd: rd, r: v.r}
 	}
 
 	return io.NopCloser(rd)
@@ -874,6 +912,10 @@ func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 			return zr
 		}
 		columns := param.Key("Columns").Int64()
+		// opencode-go hardening: Columns sizes two buffers.
+		if columns < 0 || columns > maxPredictorColumns {
+			limitPanic("predictor Columns")
+		}
 		switch pred.Int64() {
 		default:
 			if DebugOn {

@@ -52,6 +52,7 @@ type buffer struct {
 	useAES      bool
 	objptr      objptr
 	depth       int // current object nesting depth
+	elems       int // opencode-go hardening: members of the current top-level object
 }
 
 // newBuffer returns a new buffer reading from r at the given offset.
@@ -182,11 +183,14 @@ func (b *buffer) readToken() token {
 }
 
 func (b *buffer) readHexString() token {
+	// opencode-go hardening: appendToken caps the token length, and both
+	// loops stop at end of input — readByte returns '\n' forever there, so
+	// an unterminated "<" at the end of a content stream used to spin.
 	tmp := b.tmp[:0]
 	for {
 	Loop:
 		c := b.readByte()
-		if c == '>' {
+		if c == '>' || b.eof {
 			break
 		}
 		if isSpace(c) {
@@ -194,6 +198,9 @@ func (b *buffer) readHexString() token {
 		}
 	Loop2:
 		c2 := b.readByte()
+		if b.eof {
+			break
+		}
 		if isSpace(c2) {
 			goto Loop2
 		}
@@ -202,7 +209,7 @@ func (b *buffer) readHexString() token {
 			b.errorf("malformed hex string %c %c %s", c, c2, b.buf[b.pos:])
 			break
 		}
-		tmp = append(tmp, byte(x))
+		tmp = appendToken(tmp, byte(x))
 	}
 	b.tmp = tmp
 	return string(tmp)
@@ -221,6 +228,7 @@ func unhex(b byte) int {
 }
 
 func (b *buffer) readLiteralString() token {
+	// opencode-go hardening: appendToken caps the token length.
 	tmp := b.tmp[:0]
 	depth := 1
 Loop:
@@ -228,32 +236,32 @@ Loop:
 		c := b.readByte()
 		switch c {
 		default:
-			tmp = append(tmp, c)
+			tmp = appendToken(tmp, c)
 		case '(':
 			depth++
-			tmp = append(tmp, c)
+			tmp = appendToken(tmp, c)
 		case ')':
 			if depth--; depth == 0 {
 				break Loop
 			}
-			tmp = append(tmp, c)
+			tmp = appendToken(tmp, c)
 		case '\\':
 			switch c = b.readByte(); c {
 			default:
 				b.errorf("invalid escape sequence \\%c", c)
-				tmp = append(tmp, '\\', c)
+				tmp = appendToken(tmp, '\\', c)
 			case 'n':
-				tmp = append(tmp, '\n')
+				tmp = appendToken(tmp, '\n')
 			case 'r':
-				tmp = append(tmp, '\r')
+				tmp = appendToken(tmp, '\r')
 			case 'b':
-				tmp = append(tmp, '\b')
+				tmp = appendToken(tmp, '\b')
 			case 't':
-				tmp = append(tmp, '\t')
+				tmp = appendToken(tmp, '\t')
 			case 'f':
-				tmp = append(tmp, '\f')
+				tmp = appendToken(tmp, '\f')
 			case '(', ')', '\\':
-				tmp = append(tmp, c)
+				tmp = appendToken(tmp, c)
 			case '\r':
 				if b.readByte() != '\n' {
 					b.unreadByte()
@@ -274,7 +282,7 @@ Loop:
 				if x > 255 {
 					b.errorf("invalid octal escape \\%03o", x)
 				}
-				tmp = append(tmp, byte(x))
+				tmp = appendToken(tmp, byte(x))
 			}
 		}
 	}
@@ -283,6 +291,7 @@ Loop:
 }
 
 func (b *buffer) readName() token {
+	// opencode-go hardening: appendToken caps the token length.
 	tmp := b.tmp[:0]
 	for {
 		c := b.readByte()
@@ -295,16 +304,17 @@ func (b *buffer) readName() token {
 			if x < 0 {
 				b.errorf("malformed name")
 			}
-			tmp = append(tmp, byte(x))
+			tmp = appendToken(tmp, byte(x))
 			continue
 		}
-		tmp = append(tmp, c)
+		tmp = appendToken(tmp, c)
 	}
 	b.tmp = tmp
 	return name(string(tmp))
 }
 
 func (b *buffer) readKeyword() token {
+	// opencode-go hardening: appendToken caps the token length.
 	tmp := b.tmp[:0]
 	for {
 		c := b.readByte()
@@ -312,7 +322,7 @@ func (b *buffer) readKeyword() token {
 			b.unreadByte()
 			break
 		}
-		tmp = append(tmp, c)
+		tmp = appendToken(tmp, c)
 	}
 	b.tmp = tmp
 	s := string(tmp)
@@ -415,6 +425,9 @@ func (b *buffer) readObject() object {
 		b.errorf("object nesting exceeds maximum depth %d", maxObjectDepth)
 		return nil
 	}
+	if b.depth == 1 {
+		b.elems = 0 // opencode-go hardening: new top-level object
+	}
 
 	tok := b.readToken()
 	if kw, ok := tok.(keyword); ok {
@@ -481,6 +494,7 @@ func (b *buffer) readArray() object {
 		if tok == nil || tok == io.EOF || tok == keyword("]") {
 			break
 		}
+		b.countElem() // opencode-go hardening
 		b.unreadToken(tok)
 		x = append(x, b.readObject())
 	}
@@ -505,6 +519,7 @@ func (b *buffer) readDict() object {
 			b.errorf("unexpected non-name key %T(%v) parsing dictionary", tok, tok)
 			continue
 		}
+		b.countElem() // opencode-go hardening
 		x[n] = b.readObject()
 	}
 

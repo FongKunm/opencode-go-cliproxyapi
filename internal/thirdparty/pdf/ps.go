@@ -19,6 +19,11 @@ func (stk *Stack) Len() int {
 }
 
 func (stk *Stack) Push(v Value) {
+	// opencode-go hardening: operands without operators must not grow the
+	// stack without bound.
+	if len(stk.stack) >= maxStackDepth {
+		limitPanic("operand stack")
+	}
 	stk.stack = append(stk.stack, v)
 }
 
@@ -56,6 +61,7 @@ func newDict() Value {
 func Interpret(strm Value, do func(stk *Stack, op string)) {
 	var stk Stack
 	var dicts []dict
+	defs := 0 // opencode-go hardening: def operations so far
 	var rd io.Reader
 	if strm.Kind() == Array {
 		readers := make([]io.Reader, 0, strm.Len())
@@ -106,6 +112,9 @@ Reading:
 				if d.Kind() != Dict {
 					panic("cannot begin non-dict")
 				}
+				if len(dicts) >= maxDictStack { // opencode-go hardening
+					limitPanic("dictionary nesting")
+				}
 				dicts = append(dicts, d.data.(dict))
 				continue
 			case "end":
@@ -134,6 +143,9 @@ Reading:
 					// panic(fmt.Sprintf("def of non-name: %+v", stk.Pop().data))
 					// Skip the value if it has key without value
 					continue
+				}
+				if defs++; defs > maxDictDefs { // opencode-go hardening
+					limitPanic("dictionary definitions")
 				}
 				dicts[len(dicts)-1][key] = val.data
 				continue
@@ -172,6 +184,11 @@ func readObjectRecover(b *buffer) (obj object, ok bool) {
 			// deref, index out of range, ...) is a genuine bug and must not
 			// be silently swallowed as malformed input.
 			if _, isRuntime := r.(runtime.Error); isRuntime {
+				panic(r)
+			}
+			// opencode-go hardening: a safety limit ends the whole call
+			// instead of being swallowed as one malformed operand.
+			if _, isLimit := r.(*LimitError); isLimit {
 				panic(r)
 			}
 			obj, ok = nil, false

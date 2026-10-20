@@ -46,7 +46,9 @@ func isUTF16(s string) bool {
 
 func utf16Decode(s string) string {
 	var u []uint16
-	for i := 0; i < len(s); i += 2 {
+	// opencode-go hardening: ignore a trailing odd byte instead of indexing
+	// past the end (CMap destinations come straight from the file).
+	for i := 0; i+1 < len(s); i += 2 {
 		u = append(u, uint16(s[i])<<8|uint16(s[i+1]))
 	}
 	return string(utf16.Decode(u))

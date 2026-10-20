@@ -25,6 +25,7 @@ type Page struct {
 func (r *Reader) Page(num int) Page {
 	num-- // now 0-indexed
 	page := r.Trailer().Key("Root").Key("Pages")
+	steps := 0 // opencode-go hardening: a cyclic page tree must not loop forever
 Search:
 	for page.Key("Type").Name() == "Pages" {
 		count := int(page.Key("Count").Int64())
@@ -33,6 +34,9 @@ Search:
 		}
 		kids := page.Key("Kids")
 		for i := 0; i < kids.Len(); i++ {
+			if steps++; steps > maxPageTreeSteps {
+				return Page{}
+			}
 			kid := kids.Index(i)
 			if kid.Key("Type").Name() == "Pages" {
 				c := int(kid.Key("Count").Int64())
@@ -114,9 +118,13 @@ func (r *Reader) GetStyledTexts() (sentences []Text, err error) {
 }
 
 func (p Page) findInherited(key string) Value {
+	depth := 0 // opencode-go hardening: a /Parent cycle must not loop forever
 	for v := p.V; !v.IsNull(); v = v.Key("Parent") {
 		if r := v.Key(key); !r.IsNull() {
 			return r
+		}
+		if depth++; depth > maxInheritDepth {
+			break
 		}
 	}
 	return Value{}
@@ -235,7 +243,7 @@ func (f Font) getEncoder() TextEncoding {
 			return &nopEncoder{}
 		}
 	case Dict:
-		return &dictEncoder{enc.Key("Differences")}
+		return &dictEncoder{v: enc.Key("Differences")}
 	case Null:
 		return f.charmapEncoding()
 	default:
@@ -261,33 +269,50 @@ func (f *Font) charmapEncoding() TextEncoding {
 
 type dictEncoder struct {
 	v Value
+	// opencode-go hardening: the Differences array is resolved once into a
+	// code table, so decoding costs O(len(raw)) instead of
+	// O(len(raw) × len(Differences)) per string.
+	table *[256]rune
 }
 
 func (e *dictEncoder) Decode(raw string) (text string) {
+	if e.table == nil {
+		e.table = e.buildTable()
+	}
 	r := make([]rune, 0, len(raw))
 	for i := 0; i < len(raw); i++ {
-		ch := rune(raw[i])
-		n := -1
-		for j := 0; j < e.v.Len(); j++ {
-			x := e.v.Index(j)
-			if x.Kind() == Integer {
-				n = int(x.Int64())
-				continue
-			}
-			if x.Kind() == Name {
-				if int(raw[i]) == n {
-					r := nameToRune[x.Name()]
-					if r != 0 {
-						ch = r
-						break
-					}
-				}
-				n++
-			}
-		}
-		r = append(r, ch)
+		r = append(r, e.table[raw[i]])
 	}
 	return string(r)
+}
+
+// buildTable resolves Differences exactly as the original per-byte scan
+// did: the first name at a code's position with a known rune wins, and
+// codes without one decode to themselves.
+func (e *dictEncoder) buildTable() *[256]rune {
+	var t [256]rune
+	var set [256]bool
+	for i := range t {
+		t[i] = rune(i)
+	}
+	n := -1
+	for j := 0; j < e.v.Len(); j++ {
+		x := e.v.Index(j)
+		if x.Kind() == Integer {
+			n = int(x.Int64())
+			continue
+		}
+		if x.Kind() == Name {
+			if n >= 0 && n < len(t) && !set[n] {
+				if r := nameToRune[x.Name()]; r != 0 {
+					t[n] = r
+					set[n] = true
+				}
+			}
+			n++
+		}
+	}
+	return &t
 }
 
 // A TextEncoding represents a mapping between
@@ -343,6 +368,10 @@ type cmap struct {
 	space   [4][]byteRange // codespace range
 	bfrange []bfrange
 	bfchar  []bfchar
+
+	// opencode-go hardening: owning Reader (budgets) and lookup index.
+	r   *Reader
+	idx *cmapIndex
 }
 
 func (m *cmap) Decode(raw string) (text string) {
@@ -350,21 +379,26 @@ func (m *cmap) Decode(raw string) (text string) {
 Parse:
 	for len(raw) > 0 {
 		for n := 1; n <= 4 && n <= len(raw); n++ { // number of digits in character replacement (1-4 possible)
+			// opencode-go hardening: charge the per-document decoding budget.
+			m.chargeCmapWork(1 + len(m.space[n-1]))
+
 			for _, space := range m.space[n-1] { // find matching codespace Ranges for number of digits
 				if space.low <= raw[:n] && raw[:n] <= space.high { // see if value is in range
 					text := raw[:n]
 					raw = raw[n:]
-					for _, bfchar := range m.bfchar { // check for matching bfchar
-						if len(bfchar.orig) == n && bfchar.orig == text {
-							r = append(r, []rune(utf16Decode(bfchar.repl))...)
-							continue Parse
-						}
+					// opencode-go hardening: indexed lookups (cmapIndex)
+					// replace the linear bfchar and bfrange scans with the
+					// same first-match result.
+					if repl, ok := m.index().chars[text]; ok { // check for matching bfchar
+						r = append(r, []rune(utf16Decode(repl))...)
+						continue Parse
 					}
-					for _, bfrange := range m.bfrange { // check for matching bfrange
-						if len(bfrange.lo) == n && bfrange.lo <= text && text <= bfrange.hi {
+					if bfrange := m.findRange(text); bfrange != nil { // check for matching bfrange
+						{
 							if bfrange.dst.Kind() == String {
 								s := bfrange.dst.RawString()
-								if bfrange.lo != text { // value isn't at the beginning of the range so scale result
+								// opencode-go hardening: an empty destination has no last byte to shift.
+								if bfrange.lo != text && s != "" { // value isn't at the beginning of the range so scale result
 									b := []byte(s)
 									b[len(b)-1] += text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1] // increment last byte by difference
 									s = string(b)
@@ -409,7 +443,18 @@ Parse:
 func readCmap(toUnicode Value) *cmap {
 	n := -1
 	var m cmap
+	m.r = toUnicode.r // opencode-go hardening: entry and work budgets
 	ok := true
+	// opencode-go hardening: the entry counts below come from the stream;
+	// boundCount limits each block to the operands actually on the stack
+	// (popping an empty stack yields nulls, and a huge count used to append
+	// them until memory ran out).
+	boundCount := func(stk *Stack, per int) int {
+		if limit := stk.Len() / per; n > limit {
+			return limit
+		}
+		return n
+	}
 	Interpret(toUnicode, func(stk *Stack, op string) {
 		if !ok {
 			return
@@ -433,14 +478,20 @@ func readCmap(toUnicode Value) *cmap {
 				ok = false
 				return
 			}
+			n = boundCount(stk, 2)
 			for i := 0; i < n; i++ {
 				hi, lo := stk.Pop().RawString(), stk.Pop().RawString()
-				if len(lo) == 0 || len(lo) != len(hi) {
+				// opencode-go hardening: codes are at most 4 bytes (m.space
+				// has 4 slots); longer ranges used to index out of range.
+				if len(lo) == 0 || len(lo) != len(hi) || len(lo) > len(m.space) {
 					if DebugOn {
 						println("bad codespace range")
 					}
 					ok = false
 					return
+				}
+				if len(m.space[len(lo)-1]) >= maxCodespaceRanges || !m.addCmapEntry() {
+					continue // opencode-go hardening: soft limits
 				}
 				m.space[len(lo)-1] = append(m.space[len(lo)-1], byteRange{lo, hi})
 			}
@@ -451,8 +502,12 @@ func readCmap(toUnicode Value) *cmap {
 			if n < 0 {
 				panic("missing beginbfchar")
 			}
+			n = boundCount(stk, 2)
 			for i := 0; i < n; i++ {
 				repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
+				if !m.addCmapEntry() {
+					continue // opencode-go hardening: soft limit
+				}
 				m.bfchar = append(m.bfchar, bfchar{orig, repl})
 			}
 		case "beginbfrange":
@@ -461,8 +516,12 @@ func readCmap(toUnicode Value) *cmap {
 			if n < 0 {
 				panic("missing beginbfrange")
 			}
+			n = boundCount(stk, 3)
 			for i := 0; i < n; i++ {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
+				if !m.addCmapEntry() {
+					continue // opencode-go hardening: soft limit
+				}
 				m.bfrange = append(m.bfrange, bfrange{srcLo, srcHi, dst})
 			}
 		case "defineresource":
