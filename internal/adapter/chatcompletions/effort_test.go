@@ -1,6 +1,7 @@
 package chatcompletions
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -115,5 +116,30 @@ func TestResponsesAndChatEffortsUntouchedOnDeepSeek(t *testing.T) {
 	}
 	if got, ok := buildEffort(t, "deepseek-v4-pro", "openai-response", `{"input":"hi"}`, nil); ok {
 		t.Fatalf("responses without effort must omit the field, got %v", got)
+	}
+}
+
+func TestOverrideReasoningEffort(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low","n":12345678901234567890}`)
+	out, eErr := OverrideReasoningEffort(body, "max")
+	m := decodeOut(t, out, eErr)
+	if m["reasoning_effort"] != "max" || m["model"] != "deepseek-v4-pro" {
+		t.Fatalf("override = %v", m)
+	}
+	if !strings.Contains(string(out), `"n":12345678901234567890`) {
+		t.Fatalf("nested values must pass through byte-exact: %s", out)
+	}
+	out, eErr = OverrideReasoningEffort([]byte(`{"model":"m"}`), "high")
+	if m = decodeOut(t, out, eErr); m["reasoning_effort"] != "high" {
+		t.Fatalf("override must add the field: %v", m)
+	}
+	out, eErr = OverrideReasoningEffort(body, "")
+	if m = decodeOut(t, out, eErr); m["reasoning_effort"] != nil {
+		t.Fatalf("empty effort must remove the field: %v", m)
+	}
+	for _, bad := range []string{`{`, `null`, `[]`} {
+		if _, eErr := OverrideReasoningEffort([]byte(bad), "high"); eErr == nil {
+			t.Fatalf("malformed body %q must fail translation", bad)
+		}
 	}
 }

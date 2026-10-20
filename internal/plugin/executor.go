@@ -27,6 +27,7 @@ import (
 	"opencode-go-cliproxyapi/internal/catalog"
 	"opencode-go-cliproxyapi/internal/config"
 	"opencode-go-cliproxyapi/internal/errclass"
+	"opencode-go-cliproxyapi/internal/thinking"
 )
 
 // executorRequest mirrors rpcExecutorRequest: the SDK embeds
@@ -42,10 +43,11 @@ type executorRequest struct {
 // resolvedExecution carries everything both execution paths need after
 // model/key resolution succeeded.
 type resolvedExecution struct {
-	cfg   config.Config
-	rec   catalog.ModelRecord
-	key   string
-	tools shared.ResponseTools
+	cfg    config.Config
+	rec    catalog.ModelRecord
+	key    string
+	tools  shared.ResponseTools
+	effort thinking.Override // forced by a model-name thinking suffix (model_suffix.go)
 }
 
 // resolveExecution resolves the requested model against the snapshot and
@@ -64,16 +66,18 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth has no api key"})
 	}
 	var rec catalog.ModelRecord
+	var effort thinking.Override
 	var found bool
 	if mgr != nil && req.Model != "" {
-		rec, found = mgr.Lookup(req.Model)
+		rec, effort, found = lookupModel(mgr, req.Model)
 	}
 	if !found {
 		// 400, not 404: see errclass.UnknownModel (a 404 makes CPA cool the
 		// model down for 12 hours).
 		return nil, classEnvelope(errclass.UnknownModel(req.Model))
 	}
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools()}, nil
+	debugTrace("executor model resolved requested=%s upstream=%s suffix_effort_set=%t suffix_effort=%s", req.Model, rec.UpstreamID, effort.Set, effort.Effort)
+	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools(), effort: effort}, nil
 }
 
 // handleExecute implements executor.execute (non-stream). Stream-flagged
@@ -96,7 +100,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 	debugTrace("executor session mode=%s source_format=%s x_opencode_session=%s fallback=%t", "non-stream", req.SourceFormat, sessionID, sessionID == emptyOpenCodeSessionID)
-	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, res.rec.Thinking, &res.tools)
+	upstreamBody, eErr := res.upstreamRequest(req.SourceFormat, req.OriginalRequest)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
@@ -363,7 +367,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 	debugTrace("executor session mode=%s source_format=%s x_opencode_session=%s fallback=%t", "stream", req.SourceFormat, sessionID, sessionID == emptyOpenCodeSessionID)
-	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, res.rec.Thinking, &res.tools)
+	upstreamBody, eErr := res.upstreamRequest(req.SourceFormat, req.OriginalRequest)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
