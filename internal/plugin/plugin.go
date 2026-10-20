@@ -30,7 +30,7 @@ const (
 	// pluginVersion 和 .so 文件名里的 -v<版本> 保持一致：宿主选用哪个 .so 只看文件名里的版本，
 	// 自报版本只在文件名不带版本时兜底，另外用于日志和管理页显示。版本号用纯数字（见 FORK.md）。
 	// 我们 fork 的补丁版：0.2.2 上游 + count_tokens。
-	pluginVersion = "0.2.2-ph1"
+	pluginVersion = "0.2.2.2"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go

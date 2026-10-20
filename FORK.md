@@ -12,6 +12,7 @@
 |---|---|---|
 | `0.2.2` | 上游原版 | 包含 tool_result 图片修复（PR #16） |
 | `0.2.2-ph1` | **实现 `executor.count_tokens`** | 官方实现是直接回 `unsupported`，Claude Code / Claude Desktop 每轮的 `/v1/messages/count_tokens` 全部 400。详见下 |
+| `0.2.2.2` | **历史内容预处理、思考回传与档位、保活、后缀名** | 见下「0.2.2.2」。从这一版起版本号用纯数字四段 |
 
 ### count_tokens（`internal/plugin/counttokens.go`）
 
@@ -25,6 +26,21 @@
 - 返回格式按客户端协议：`claude` / `openai` → `{"input_tokens":N}`；
   `openai-response` → `{"response":{"usage":{...}}}`。
 - **不要改成 `len(body)/4`**：JSON 骨架和 base64 图片会被整体高估。
+
+### 0.2.2.2（1020）
+
+- **历史里 DeepSeek 不认的内容不再 400**（`internal/adapter/sanitize`、`internal/pdftext`）：从真 Claude / GPT
+  中途切到 DeepSeek，或 Claude Code 直接发 PDF 时，以前每一轮都 400、只能清空对话。现在转换前先预处理：
+  PDF 抽正文（内置加固过的 ledongthuc/pdf，见 `internal/thirdparty/pdf`）、搜索 / 抓取 / 代码执行结果转成文字、
+  托管工具（web_search_* 等）从 tools 里去掉；认得的内容原样不动。Codex 的压缩记录、web_search_call 等同理。
+- **思考内容回传给客户端**：reasoning_content 转成 Claude 的 thinking 块 / Responses 的 reasoning 项（流式、非流式）；
+  历史里的思考作为 reasoning_content 回传给 DeepSeek。
+- **思考档生效**：Claude 的 `output_config.effort`、`thinking.type=disabled`、enabled+budget 都换算成
+  reasoning_effort，DeepSeek 按完整 7 档（none～max）夹紧。
+- **保活**：下游超过 15 秒没输出就补一帧（Claude `event: ping`，Responses SSE 注释，Chat 入站不发）。
+- **模型名带思考档后缀**（如 `deepseek-v4-pro(high)`）：剥掉后缀查目录，后缀换成 reasoning_effort；
+  目录里真查不到回 400（以前回 404，会让 CPA 把模型冷却 12 小时）。
+- 跑模糊测试一律加 `-parallel 4`、多包测试加 `-p 4`（开发机 24 核，默认并发会占满整机）。
 
 ## 版本号规则（必须遵守）
 
