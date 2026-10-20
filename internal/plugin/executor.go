@@ -176,7 +176,7 @@ func resolveOpenCodeSessionID(req executorRequest) (string, *errclass.Error) {
 			return sid, nil
 		}
 	}
-	return deriveOpenCodeSessionID(req.SourceFormat, req.OriginalRequest)
+	return deriveSessionTolerant(req.SourceFormat, req.OriginalRequest)
 }
 
 // deriveOpenCodeSessionID hashes the model-visible content of the initial user
