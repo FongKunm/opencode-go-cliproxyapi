@@ -158,11 +158,8 @@ func claudeContent(raw json.RawMessage, role string) (json.RawMessage, bool) {
 // claudeToolResult rewrites the block array of a tool_result. The
 // translator joins its text parts without a separator and keeps images.
 func claudeToolResult(raw json.RawMessage) (json.RawMessage, bool) {
-	m, ok := object(raw)
-	if !ok {
-		return nil, false
-	}
-	blocks, ok := array(m["content"])
+	content, _ := field(raw, "content")
+	blocks, ok := array(content)
 	if !ok {
 		return nil, false
 	}
@@ -189,6 +186,10 @@ func claudeToolResult(raw json.RawMessage) (json.RawMessage, bool) {
 	if !changed {
 		return nil, false
 	}
+	m, ok := object(raw)
+	if !ok {
+		return nil, false // malformed block: the translator reports it
+	}
 	m["content"] = assemble(pieces, true, "text")
 	return marshal(m), true
 }
@@ -197,7 +198,7 @@ func claudeToolResult(raw json.RawMessage) (json.RawMessage, bool) {
 // position. allowImages reports whether image blocks may be emitted.
 func renderClaude(raw json.RawMessage, allowImages bool) []piece {
 	m, _ := object(raw)
-	t := str(m, "type")
+	t := typeOf(raw)
 	one := func(s string) []piece { return []piece{synthText(s)} }
 	switch t {
 	case "document":
