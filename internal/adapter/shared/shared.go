@@ -1353,7 +1353,7 @@ func ThinkingEnabled(t *ClaudeThinking) bool {
 // so each target renderer applies its own vocabulary and policies.
 type ClaudeBlock struct {
 	Kind    string          // text, image, tool_use, tool_result, thinking, redacted_thinking, or an unknown wire type
-	Text    string          // text blocks
+	Text    string          // text blocks; thinking blocks: the thinking text
 	URL     string          // image blocks: resolved http(s)/data URL
 	CallID  string          // tool_use "id" / tool_result "tool_use_id"
 	Name    string          // tool_use name
@@ -1414,6 +1414,7 @@ type claudeWireBlock struct {
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"` // tool_result payload: string or blocks
 	IsError   bool            `json:"is_error"`
+	Thinking  json.RawMessage `json:"thinking"` // thinking text, decoded leniently
 }
 
 // DecodeClaudeMessages decodes an inbound Anthropic Messages request body
@@ -1515,6 +1516,8 @@ func decodeClaudeBlocks(raw json.RawMessage) ([]ClaudeBlock, *errclass.Error) {
 			blk.CallID = wb.ID
 		case "tool_result":
 			blk.CallID = wb.ToolUseID
+		case "thinking":
+			blk.Text = lenientString(wb.Thinking)
 		}
 		blocks = append(blocks, blk)
 	}

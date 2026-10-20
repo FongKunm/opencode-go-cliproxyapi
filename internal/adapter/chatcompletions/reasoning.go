@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"opencode-go-cliproxyapi/internal/adapter/shared"
+	"opencode-go-cliproxyapi/internal/thinking"
 )
 
 // ---- upstream reasoning text (FR-006) ----
@@ -185,4 +186,85 @@ func (sc *StreamConverter) withReasoningItems(items []any) []any {
 		items = items[1:]
 	}
 	return out
+}
+
+// ---- history reasoning passback (FR-005) ----
+
+// reasoningSeparator joins several reasoning texts bound for one
+// reasoning_content, as CPA's own Claude→Chat Completions translator does.
+const reasoningSeparator = "\n\n"
+
+// passesReasoningBack reports whether historical reasoning is replayed to
+// upstreamModel as the assistant message's reasoning_content. Only
+// DeepSeek: in thinking mode its multi-step tool calls need the current
+// turn's reasoning_content sent back (reasoning from earlier turns is
+// ignored upstream). Every other family keeps the FR-005 omission policy.
+func passesReasoningBack(upstreamModel string) bool {
+	return thinking.IsDeepSeek(upstreamModel)
+}
+
+// reasoningCarry threads Responses-history reasoning to the assistant
+// message of the same model turn: a reasoning item precedes that turn's
+// message and function_call items, so held text lands on the next
+// assistant message the translation produces (a new one, or the tool-call
+// message it merges into). A user message or tool output in between ends
+// that span and discards the text — it belonged to no replayed answer.
+type reasoningCarry struct {
+	keep bool // passesReasoningBack for the target model
+	text string
+}
+
+// hold collects the plaintext of one reasoning input item; encrypted-only
+// items carry none and are ignored.
+func (c *reasoningCarry) hold(item shared.RespItem) {
+	if !c.keep {
+		return
+	}
+	if text := respReasoningText(item); text != "" {
+		if c.text != "" {
+			c.text += reasoningSeparator
+		}
+		c.text += text
+	}
+}
+
+// settle hands held reasoning to msg when it is assistant output and
+// discards it otherwise.
+func (c *reasoningCarry) settle(msg *ccMessage) {
+	if c.text == "" {
+		return
+	}
+	if msg.Role == "assistant" {
+		if msg.ReasoningContent != "" {
+			msg.ReasoningContent += reasoningSeparator
+		}
+		msg.ReasoningContent += c.text
+	}
+	c.text = ""
+}
+
+// respReasoningText extracts a reasoning item's plaintext: raw
+// reasoning_text content wins (it is the full reasoning, the summary a
+// digest), else the summary parts. Blank parts are skipped.
+func respReasoningText(item shared.RespItem) string {
+	var parts []string
+	var content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if shared.HasContent(item.Content) && json.Unmarshal(item.Content, &content) == nil {
+		for _, p := range content {
+			if (p.Type == "reasoning_text" || p.Type == "text") && strings.TrimSpace(p.Text) != "" {
+				parts = append(parts, p.Text)
+			}
+		}
+	}
+	if len(parts) == 0 {
+		for _, s := range item.Summary {
+			if strings.TrimSpace(s.Text) != "" {
+				parts = append(parts, s.Text)
+			}
+		}
+	}
+	return strings.Join(parts, reasoningSeparator)
 }

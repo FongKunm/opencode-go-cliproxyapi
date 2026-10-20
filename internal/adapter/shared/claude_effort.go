@@ -19,12 +19,19 @@ func ClaudeOutputEffort(raw json.RawMessage) string {
 	var cfg struct {
 		Effort json.RawMessage `json:"effort"`
 	}
-	if json.Unmarshal(raw, &cfg) != nil || !HasContent(cfg.Effort) {
+	if json.Unmarshal(raw, &cfg) != nil {
 		return ""
 	}
-	var effort string
-	if json.Unmarshal(cfg.Effort, &effort) != nil {
+	return strings.ToLower(strings.TrimSpace(lenientString(cfg.Effort)))
+}
+
+// lenientString decodes an optional JSON string value; absent, null, and
+// non-string values yield "" instead of an error, so auxiliary fields the
+// translators only read opportunistically can never fail a request.
+func lenientString(raw json.RawMessage) string {
+	var s string
+	if !HasContent(raw) || json.Unmarshal(raw, &s) != nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(effort))
+	return s
 }

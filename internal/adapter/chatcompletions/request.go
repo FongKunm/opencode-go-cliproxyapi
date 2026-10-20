@@ -126,10 +126,11 @@ type ccContentPart struct {
 }
 
 type ccMessage struct {
-	Role       string              `json:"role"`
-	Content    any                 `json:"content"` // string, []ccContentPart, or nil
-	ToolCalls  []shared.CCToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string              `json:"tool_call_id,omitempty"`
+	Role             string              `json:"role"`
+	Content          any                 `json:"content"` // string, []ccContentPart, or nil
+	ToolCalls        []shared.CCToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string              `json:"tool_call_id,omitempty"`
+	ReasoningContent string              `json:"reasoning_content,omitempty"` // assistant history reasoning (DeepSeek only)
 }
 
 type ccRequest struct {
@@ -201,7 +202,7 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 			}
 			out.Messages = append(out.Messages, msgs...)
 		case "assistant":
-			msg, eErr := claudeAssistantMessage(m)
+			msg, eErr := claudeAssistantMessage(m, passesReasoningBack(upstreamModel))
 			if eErr != nil {
 				return nil, eErr
 			}
@@ -298,22 +299,29 @@ func claudeUserMessages(m *shared.ClaudeMessageRecord) ([]ccMessage, *errclass.E
 }
 
 // claudeAssistantMessage converts an assistant turn: text blocks join
-// the message content, tool_use blocks become tool_calls. Historical
-// thinking and redacted_thinking blocks have no Chat Completions
-// representation and are omitted by the FR-005 explicit omission policy
-// (the forward-looking control maps via effortFromBudget instead; the
-// redacted variant is pure encrypted metadata). Returns nil for empty turns.
-func claudeAssistantMessage(m *shared.ClaudeMessageRecord) (*ccMessage, *errclass.Error) {
+// the message content, tool_use blocks become tool_calls. With
+// keepReasoning (DeepSeek, see passesReasoningBack) the text of historical
+// thinking blocks — signed or not — becomes the message's
+// reasoning_content; otherwise thinking has no Chat Completions
+// representation and is omitted by the FR-005 explicit omission policy.
+// redacted_thinking is pure encrypted metadata and is always omitted.
+// Returns nil for turns without content or tool calls, reasoning included.
+func claudeAssistantMessage(m *shared.ClaudeMessageRecord, keepReasoning bool) (*ccMessage, *errclass.Error) {
 	msg := &ccMessage{Role: "assistant"}
 	var sb strings.Builder
 	sb.WriteString(m.Content)
+	var reasoning []string
 	for i := range m.Blocks {
 		blk := &m.Blocks[i]
 		switch blk.Kind {
 		case "text":
 			sb.WriteString(blk.Text)
-		case "thinking", "redacted_thinking":
-			// omitted: no Chat Completions equivalent (FR-005 policy)
+		case "thinking":
+			if keepReasoning && strings.TrimSpace(blk.Text) != "" {
+				reasoning = append(reasoning, blk.Text)
+			}
+		case "redacted_thinking":
+			// omitted: encrypted metadata, no Chat Completions equivalent
 		case "tool_use":
 			tc := shared.CCToolCall{ID: blk.CallID, Type: "function"}
 			tc.Function.Name = blk.Name
@@ -329,6 +337,7 @@ func claudeAssistantMessage(m *shared.ClaudeMessageRecord) (*ccMessage, *errclas
 	if msg.Content == nil && len(msg.ToolCalls) == 0 {
 		return nil, nil
 	}
+	msg.ReasoningContent = strings.Join(reasoning, reasoningSeparator)
 	return msg, nil
 }
 
@@ -341,8 +350,10 @@ func claudeAssistantMessage(m *shared.ClaudeMessageRecord) (*ccMessage, *errclas
 // messages, reasoning.effort maps to reasoning_effort,
 // parallel_tool_calls passes through as-is (the reverse leg forwards the
 // same field), and max_output_tokens maps to max_tokens. Historical
-// reasoning items are omitted (no CC equivalent; FR-005 explicit omission
-// policy).
+// reasoning items with plaintext (reasoning_text content or summary) become
+// the reasoning_content of the turn's assistant message for DeepSeek (see
+// reasoningCarry); otherwise, and when only encrypted_content is present,
+// they are omitted (no CC equivalent; FR-005 explicit omission policy).
 func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport, tools *shared.ResponseTools) ([]byte, *errclass.Error) {
 	var src shared.ResponsesRequest
 	if err := json.Unmarshal(body, &src); err != nil {
@@ -381,6 +392,7 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		return nil, eErr
 	}
 	applyToolChoiceCC(out, kind, tcName)
+	history := reasoningCarry{keep: passesReasoningBack(upstreamModel)}
 	for _, item := range items {
 		switch item.Type {
 		case "message":
@@ -409,6 +421,7 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			case "user", "assistant":
 				if content != nil {
 					out.Messages = append(out.Messages, ccMessage{Role: item.Role, Content: content})
+					history.settle(&out.Messages[len(out.Messages)-1])
 				}
 			default:
 				return nil, shared.ValidateRole(item.Role, EndpointPath)
@@ -427,12 +440,14 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 				last := &out.Messages[n-1]
 				if last.Role == "assistant" && last.Content == nil {
 					last.ToolCalls = append(last.ToolCalls, tc)
+					history.settle(last)
 					continue
 				}
 			}
 			out.Messages = append(out.Messages, ccMessage{
 				Role: "assistant", ToolCalls: []shared.CCToolCall{tc},
 			})
+			history.settle(&out.Messages[len(out.Messages)-1])
 		case "function_call_output", "custom_tool_call_output":
 			text, eErr := shared.RespOutputText(item.Output, "tool messages carry text only")
 			if eErr != nil {
@@ -441,8 +456,11 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			out.Messages = append(out.Messages, ccMessage{
 				Role: "tool", Content: text, ToolCallID: item.CallID,
 			})
+			history.settle(&out.Messages[len(out.Messages)-1])
 		case "reasoning":
-			// omitted: no Chat Completions equivalent (FR-005 policy)
+			// DeepSeek: held for the turn's assistant message; otherwise
+			// omitted (no Chat Completions equivalent, FR-005 policy).
+			history.hold(item)
 		default:
 			return nil, shared.UnsupportedInputItemType(item.Type)
 		}
