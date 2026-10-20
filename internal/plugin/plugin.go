@@ -27,18 +27,21 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName = "opencode-go-cliproxyapi"
-	// pluginVersion 必须和 .so 文件名里的 -v<版本> 完全一致，宿主按文件名解析后做等值比对。
+	// pluginVersion 和 .so 文件名里的 -v<版本> 保持一致：宿主选用哪个 .so 只看文件名里的版本，
+	// 自报版本只在文件名不带版本时兜底，另外用于日志和管理页显示。版本号用纯数字（见 FORK.md）。
 	// 我们 fork 的补丁版：0.2.2 上游 + count_tokens。
 	pluginVersion = "0.2.2-ph1"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
 // validPlugin rejects empty Metadata.GitHubRepository).
-const githubRepoURL = "https://github.com/massiveits/opencode-go-cliproxyapi"
+// Points at our fork (ProxyHub): the management panel must never "update"
+// this plugin to upstream builds, which would replace our patched .so.
+const githubRepoURL = "https://github.com/FongKunm/opencode-go-cliproxyapi"
 
 // registerRefreshTimeout bounds ONLY the synchronous initial/reconfigure
 // refreshOnce so a slow catalog cannot block host startup/reconfigure for a
-// full request-timeout (default 15m). On expiry registration proceeds per
+// full request-timeout (default 5m). On expiry registration proceeds per
 // FR-002 empty/stale semantics; the ticker retries at refresh-interval with
 // the full request-timeout.
 const registerRefreshTimeout = 10 * time.Second
