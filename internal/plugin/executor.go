@@ -411,14 +411,22 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 }
 
 func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string) {
+	out := newDownstreamWriter(m, downID)
 	var closeOnce sync.Once
 	closeStreams := func(downErrMsg string) {
 		closeOnce.Do(func() {
+			out.stop() // no keepalive frame may follow the close
 			_ = m.bridge.StreamClose(upstreamID)
 			_ = m.bridge.StreamCloseDownstream(downID, downErrMsg)
 		})
 	}
 	defer closeStreams("")
+	// Silences of streamKeepaliveInterval get a protocol keepalive frame,
+	// including the wait for the first upstream chunk (keepalive.go).
+	stopKeepalive := out.startKeepalive(sourceFormat, func(err error) {
+		closeStreams(errclass.Redact(err.Error()))
+	})
+	defer stopKeepalive()
 
 	var aborted atomic.Bool
 	watchdog := time.AfterFunc(res.cfg.RequestTimeout, func() {
@@ -464,7 +472,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			closeStreams(errclass.Redact(convErr.Message))
 			return
 		}
-		if emitErr := m.emitAll(downID, events); emitErr != nil {
+		if emitErr := out.emit(events); emitErr != nil {
 			closeStreams(errclass.Redact(emitErr.Error()))
 			return
 		}
@@ -477,7 +485,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	if !convDone && upstreamClosed {
 		if flusher, ok := conv.(interface{ Flush() [][]byte }); ok {
 			flushed := flusher.Flush()
-			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
+			if emitErr := out.emit(flushed); emitErr != nil {
 				closeStreams(errclass.Redact(emitErr.Error()))
 				return
 			}
